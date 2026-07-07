@@ -1,0 +1,1 @@
+"""Core-слой: auth, fetcher, parser, orchestrator."""
