@@ -11,9 +11,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Загружаем .env из корня проекта
-_ENV_PATH = Path(__file__).resolve().parent / ".env"
-load_dotenv(_ENV_PATH)
+# .env — для локального запуска; на деплое используются Variables платформы
+_PROJECT_ROOT = Path(__file__).resolve().parent
+load_dotenv(_PROJECT_ROOT / ".env", override=False)
 
 
 @dataclass(frozen=True)
@@ -79,3 +79,20 @@ class Settings:
 
 
 settings = Settings.from_env
+
+
+def log_config_status() -> None:
+    """Логирует наличие переменных (без значений) — для отладки деплоя."""
+    import logging
+
+    log = logging.getLogger("content-explorer")
+    required = ("TELEGRAM_BOT_TOKEN", "SESSION_TOKEN")
+    optional = ("CSRF_TOKEN", "REQUEST_DELAY_SEC", "MAX_RETRIES")
+
+    for name in required:
+        status = "OK" if os.getenv(name, "").strip() else "MISSING"
+        log.info("Env %s: %s", name, status)
+
+    for name in optional:
+        if os.getenv(name, "").strip():
+            log.info("Env %s: OK", name)

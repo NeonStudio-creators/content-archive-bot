@@ -13,10 +13,10 @@ import asyncio
 import logging
 import sys
 
-from aiogram import Dispatcher
+from aiogram.exceptions import TelegramAPIError, TelegramUnauthorizedError
 
-from bot.app import create_bot, on_shutdown
-from config import Settings
+from bot.app import create_bot, register_shutdown
+from config import Settings, log_config_status
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,19 +27,34 @@ logger = logging.getLogger("content-explorer")
 
 
 async def main() -> None:
+    log_config_status()
+
     try:
         settings = Settings.from_env()
     except ValueError as exc:
         logger.error("Ошибка конфигурации: %s", exc)
+        logger.error(
+            "Задайте Variables в панели деплоя: TELEGRAM_BOT_TOKEN, SESSION_TOKEN"
+        )
         sys.exit(1)
 
     bot, dp, orchestrator = create_bot(settings)
-
-    dp.shutdown.register(on_shutdown)
+    register_shutdown(dp, orchestrator)
 
     logger.info("ContentExplorer запущен. Ожидаю сообщения…")
     try:
-        await dp.start_polling(bot, orchestrator=orchestrator)
+        await dp.start_polling(bot)
+    except TelegramUnauthorizedError:
+        logger.error(
+            "Неверный TELEGRAM_BOT_TOKEN — проверьте токен от @BotFather в Variables"
+        )
+        sys.exit(1)
+    except TelegramAPIError as exc:
+        logger.error("Ошибка Telegram API: %s", exc)
+        sys.exit(1)
+    except Exception:
+        logger.exception("Критическая ошибка при polling")
+        sys.exit(1)
     finally:
         await orchestrator.close()
         await bot.session.close()

@@ -38,8 +38,11 @@ def create_bot(settings: Settings) -> tuple[Bot, Dispatcher, ArchiveOrchestrator
     return bot, dp, orchestrator
 
 
-async def on_shutdown(dispatcher: Dispatcher) -> None:
-    orchestrator: ArchiveOrchestrator | None = dispatcher.get("orchestrator")
-    if orchestrator:
+def register_shutdown(dp: Dispatcher, orchestrator: ArchiveOrchestrator) -> None:
+    """Регистрирует graceful shutdown (aiogram 3 вызывает handler без аргументов)."""
+
+    async def _on_shutdown() -> None:
         await orchestrator.close()
         logger.info("ArchiveOrchestrator закрыт")
+
+    dp.shutdown.register(_on_shutdown)
