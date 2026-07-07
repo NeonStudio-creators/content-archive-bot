@@ -129,6 +129,7 @@ class ArchiveBundle:
                 "view_count": self.metadata.view_count,
                 "location": self.metadata.location,
                 "tags": self.metadata.tags,
+                "raw_fields": self.metadata.raw_fields,
             },
             "media": [
                 {

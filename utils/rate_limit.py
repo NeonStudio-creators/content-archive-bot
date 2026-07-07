@@ -10,20 +10,14 @@ import time
 
 class QuietRateLimiter:
     """
-    Минимизирует нагрузку на платформу:
-    гарантирует паузу между последовательными запросами.
+    Контроль частоты + параллельные потоки.
+    До max_concurrent запросов одновременно, с паузой delay_sec на слот.
     """
 
-    def __init__(self, delay_sec: float = 1.5) -> None:
+    def __init__(self, delay_sec: float = 1.5, max_concurrent: int = 4) -> None:
         self._delay = delay_sec
-        self._last_request_at: float = 0.0
-        self._lock = asyncio.Lock()
+        self._semaphore = asyncio.Semaphore(max_concurrent)
 
     async def wait(self) -> None:
-        """Ждёт, если с прошлого запроса прошло меньше delay_sec."""
-        async with self._lock:
-            now = time.monotonic()
-            elapsed = now - self._last_request_at
-            if elapsed < self._delay:
-                await asyncio.sleep(self._delay - elapsed)
-            self._last_request_at = time.monotonic()
+        async with self._semaphore:
+            await asyncio.sleep(self._delay)

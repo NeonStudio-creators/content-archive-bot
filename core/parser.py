@@ -80,6 +80,9 @@ def _parse_media_node(node: dict[str, Any]) -> list[MediaAsset]:
             extra={
                 "shortcode": node.get("shortcode"),
                 "product_type": node.get("product_type"),
+                "has_audio": node.get("has_audio"),
+                "video_codec": node.get("video_codec"),
+                "accessibility_caption": node.get("accessibility_caption"),
             },
         )
     )
@@ -94,6 +97,8 @@ class EntityDeepCollector:
         resolved: ResolvedLink,
         profile_data: dict[str, Any],
         post_edges: list[dict[str, Any]],
+        reel_edges: list[dict[str, Any]] | None = None,
+        tagged_edges: list[dict[str, Any]] | None = None,
     ) -> ArchiveBundle:
         user = (
             profile_data.get("data", {}).get("user")
@@ -118,6 +123,12 @@ class EntityDeepCollector:
                 "category": user.get("category_name"),
                 "business_email": user.get("business_email"),
                 "is_business": user.get("is_business_account"),
+                "is_professional": user.get("is_professional_account"),
+                "pronouns": user.get("pronouns"),
+                "bio_links": [
+                    l.get("url") for l in user.get("bio_links", [])
+                ],
+                "highlight_reel_count": user.get("highlight_reel_count"),
             },
         )
 
@@ -139,6 +150,31 @@ class EntityDeepCollector:
                 )
             )
 
+        for edge in reel_edges or []:
+            node = edge.get("node", {})
+            media.extend(_parse_media_node(node))
+            relations.append(
+                RelationEdge(
+                    relation_type="reel",
+                    target_id=str(node.get("id", "")),
+                    target_label=node.get("shortcode", ""),
+                    metadata={"product_type": node.get("product_type")},
+                )
+            )
+
+        for edge in tagged_edges or []:
+            node = edge.get("node", {})
+            relations.append(
+                RelationEdge(
+                    relation_type="tagged_in",
+                    target_id=str(node.get("id", "")),
+                    target_label=node.get("shortcode", ""),
+                    metadata={
+                        "owner": (node.get("owner") or {}).get("username"),
+                    },
+                )
+            )
+
         # Связанные аккаунты
         for edge in user.get("edge_related_profiles", {}).get("edges", []):
             rel_user = edge.get("node", {})
@@ -147,6 +183,7 @@ class EntityDeepCollector:
                     relation_type="related_profile",
                     target_id=str(rel_user.get("id", "")),
                     target_label=rel_user.get("username", ""),
+                    metadata={"is_verified": rel_user.get("is_verified")},
                 )
             )
 
@@ -159,6 +196,8 @@ class EntityDeepCollector:
             raw_graphql=[profile_data],
             collection_stats={
                 "posts_collected": len(post_edges),
+                "reels_collected": len(reel_edges or []),
+                "tagged_collected": len(tagged_edges or []),
                 "media_files": len(media),
             },
         )
@@ -168,6 +207,9 @@ class EntityDeepCollector:
         resolved: ResolvedLink,
         media_data: dict[str, Any],
         comment_edges: list[dict[str, Any]] | None = None,
+        *,
+        likers: list[dict[str, Any]] | None = None,
+        owner_profile: dict[str, Any] | None = None,
     ) -> ArchiveBundle:
         media_node = (
             media_data.get("data", {}).get("shortcode_media")
@@ -180,6 +222,7 @@ class EntityDeepCollector:
         caption_edges = media_node.get("edge_media_to_caption", {}).get("edges", [])
         caption = caption_edges[0].get("node", {}).get("text") if caption_edges else None
         tags = [t for t in (caption or "").split() if t.startswith("#")]
+        mentions = [t[1:] for t in (caption or "").split() if t.startswith("@")]
 
         owner = media_node.get("owner", {})
         metadata = EntityMetadata(
@@ -199,8 +242,28 @@ class EntityDeepCollector:
             raw_fields={
                 "product_type": media_node.get("product_type"),
                 "is_video": media_node.get("is_video"),
+                "mentions": mentions,
+                "accessibility_caption": media_node.get("accessibility_caption"),
+                "music_info": media_node.get("clips_music_attribution_info")
+                or media_node.get("music_info"),
+                "sponsor_tags": [
+                    t.get("sponsor", {}).get("username")
+                    for t in media_node.get("edge_media_to_sponsor_user", {})
+                    .get("edges", [])
+                ],
             },
         )
+
+        if owner_profile:
+            owner_user = owner_profile.get("data", {}).get("user", {})
+            if owner_user:
+                metadata.raw_fields["owner_followers"] = owner_user.get(
+                    "edge_followed_by", {}
+                ).get("count")
+                metadata.raw_fields["owner_posts"] = owner_user.get(
+                    "edge_owner_to_timeline_media", {}
+                ).get("count")
+                metadata.raw_fields["owner_bio"] = owner_user.get("biography")
 
         media = _parse_media_node(media_node)
         relations: list[RelationEdge] = []
@@ -228,7 +291,7 @@ class EntityDeepCollector:
                 )
             )
 
-        # Комментарии как слой активности
+        # Комментарии
         for edge in comment_edges or []:
             comment = edge.get("node", {})
             activity.append(
@@ -241,6 +304,27 @@ class EntityDeepCollector:
                 )
             )
 
+        # Лайкнувшие
+        for liker in likers or []:
+            activity.append(
+                ActivityRecord(
+                    activity_type="like",
+                    actor=liker.get("username"),
+                    content=None,
+                    extra={
+                        "full_name": liker.get("full_name"),
+                        "is_verified": liker.get("is_verified"),
+                    },
+                )
+            )
+            relations.append(
+                RelationEdge(
+                    relation_type="liker",
+                    target_id=str(liker.get("pk", "")),
+                    target_label=liker.get("username", ""),
+                )
+            )
+
         return ArchiveBundle(
             source_url=resolved.original_url,
             resolved_type=EntityType.PUBLICATION,
@@ -249,7 +333,15 @@ class EntityDeepCollector:
             relations=relations,
             activity=activity,
             raw_graphql=[media_data],
-            collection_stats={"comments_collected": len(activity)},
+            collection_stats={
+                "comments_collected": sum(
+                    1 for a in activity if a.activity_type == "comment"
+                ),
+                "likers_collected": len(likers or []),
+                "tagged_users": sum(
+                    1 for r in relations if r.relation_type == "tagged_user"
+                ),
+            },
         )
 
     def parse_story(

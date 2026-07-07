@@ -4,6 +4,7 @@ GraphQLFetcher и LinkResolver — сетевой слой для внутрен
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -21,6 +22,7 @@ from core.media_adapter import (
     from_rest_media_info,
 )
 from core.models import EntityType
+from utils.concurrency import first_success
 from utils.instagram_id import shortcode_to_media_id
 from utils.rate_limit import QuietRateLimiter
 from utils.retry import with_retry
@@ -36,6 +38,8 @@ DOC_IDS = {
     "media_comments": "97b41c299c4654e3ad9531e2d966a90a",
     "story_viewer": "ad99dd9d3646cc3c0dda65deb29b92a0",
     "highlight": "45246d3fe16ccc6577e0eb1a2397fb74",
+    "user_reels": "2c4c2e343a8a60aac790633715402e11",
+    "user_tagged": "e8f3c2a4e8b5a0e7e8b5a0e7e8b5a0e7",
 }
 
 MOBILE_API_BASE = "https://i.instagram.com/api/v1"
@@ -366,6 +370,32 @@ class GraphQLFetcher:
             label="user_posts",
         )
 
+    async def fetch_user_reels(self, user_id: str) -> list[dict[str, Any]]:
+        """Reels профиля."""
+        try:
+            return await self.fetch_paginated(
+                DOC_IDS["user_reels"],
+                {"id": user_id, "first": self.settings.pagination_page_size},
+                edges_path=["user", "edge_felix_video_timeline"],
+                label="user_reels",
+            )
+        except Exception as exc:
+            logger.warning("user_reels недоступны: %s", exc)
+            return []
+
+    async def fetch_user_tagged(self, user_id: str) -> list[dict[str, Any]]:
+        """Публикации, где отмечен пользователь."""
+        try:
+            return await self.fetch_paginated(
+                DOC_IDS["user_tagged"],
+                {"id": user_id, "first": self.settings.pagination_page_size},
+                edges_path=["user", "edge_user_to_photos_of_you"],
+                label="user_tagged",
+            )
+        except Exception as exc:
+            logger.warning("user_tagged недоступны: %s", exc)
+            return []
+
     def _publication_referer(self, shortcode: str, original_url: str | None = None) -> str:
         if original_url and "instagram.com" in original_url:
             return original_url.split("?")[0]
@@ -476,34 +506,135 @@ class GraphQLFetcher:
             referer,
         )
 
-        for fetcher in (
-            self._fetch_media_via_rest(shortcode, media_id, referer),
-            self._fetch_media_via_graphql(shortcode, media_id, referer),
-            self._fetch_media_via_html(shortcode, referer),
-        ):
-            result = await fetcher
-            if result:
-                return result
+        result = await first_success([
+            lambda: self._fetch_media_via_rest(shortcode, media_id, referer),
+            lambda: self._fetch_media_via_graphql(shortcode, media_id, referer),
+            lambda: self._fetch_media_via_html(shortcode, referer),
+        ])
+        if result:
+            return result
 
         raise ValueError(
             f"Публикация {shortcode} недоступна. "
             "Проверьте SESSION_TOKEN и CSRF_TOKEN — возможно, сессия истекла."
         )
 
-    async def fetch_media_comments(
+    @staticmethod
+    def _rest_comment_to_edge(comment: dict[str, Any]) -> dict[str, Any]:
+        user = comment.get("user") or {}
+        return {
+            "node": {
+                "id": str(comment.get("pk", "")),
+                "text": comment.get("text", ""),
+                "created_at": comment.get("created_at"),
+                "edge_liked_by": {"count": comment.get("comment_like_count", 0)},
+                "owner": {
+                    "id": str(user.get("pk", "")),
+                    "username": user.get("username"),
+                    "profile_pic_url": user.get("profile_pic_url"),
+                },
+            }
+        }
+
+    async def _fetch_comments_rest(
         self, media_id: str, shortcode: str
     ) -> list[dict[str, Any]]:
-        """Комментарии к публикации."""
+        referer = f"{self.settings.platform_base_url}/p/{shortcode}/"
+        edges: list[dict[str, Any]] = []
+        max_id: str | None = None
+
+        for page in range(self.settings.max_comment_pages):
+            params: dict[str, str] = {
+                "can_support_threading": "true",
+                "permalink_enabled": "false",
+            }
+            if max_id:
+                params["max_id"] = max_id
+
+            data = await self.mobile_api_get(
+                f"/media/{media_id}/comments/",
+                referer=referer,
+                label=f"comments_rest_p{page}",
+                params=params,
+            )
+            comments = data.get("comments") or []
+            for comment in comments:
+                edges.append(self._rest_comment_to_edge(comment))
+                # Ответы на комментарий
+                for child in comment.get("preview_child_comments") or []:
+                    edges.append(self._rest_comment_to_edge(child))
+
+            max_id = data.get("next_max_id")
+            if not max_id or not comments:
+                break
+
+        return edges
+
+    async def _fetch_comments_graphql(
+        self, media_id: str, shortcode: str
+    ) -> list[dict[str, Any]]:
         return await self.fetch_paginated(
             DOC_IDS["media_comments"],
             {
                 "shortcode": shortcode,
-                "first": 20,
+                "first": self.settings.comments_page_size,
             },
             edges_path=["shortcode_media", "edge_media_to_parent_comment"],
             referer=f"{self.settings.platform_base_url}/p/{shortcode}/",
-            label="media_comments",
+            label="media_comments_gql",
         )
+
+    async def fetch_media_comments(
+        self, media_id: str, shortcode: str
+    ) -> list[dict[str, Any]]:
+        """Комментарии — REST + GraphQL параллельно, берём более полный набор."""
+        rest_task = asyncio.create_task(
+            self._fetch_comments_rest(media_id, shortcode)
+        )
+        gql_task = asyncio.create_task(
+            self._fetch_comments_graphql(media_id, shortcode)
+        )
+        rest, gql = await asyncio.gather(rest_task, gql_task, return_exceptions=True)
+
+        rest_edges = rest if isinstance(rest, list) else []
+        gql_edges = gql if isinstance(gql, list) else []
+
+        if len(rest_edges) >= len(gql_edges):
+            logger.info("comments: REST %d", len(rest_edges))
+            return rest_edges
+        logger.info("comments: GraphQL %d", len(gql_edges))
+        return gql_edges
+
+    async def fetch_media_likers(
+        self, media_id: str, shortcode: str
+    ) -> list[dict[str, Any]]:
+        """Список лайкнувших (первые страницы)."""
+        referer = f"{self.settings.platform_base_url}/p/{shortcode}/"
+        likers: list[dict[str, Any]] = []
+        max_id: str | None = None
+
+        for page in range(min(5, self.settings.max_comment_pages)):
+            params: dict[str, str] = {}
+            if max_id:
+                params["max_id"] = max_id
+            try:
+                data = await self.mobile_api_get(
+                    f"/media/{media_id}/likers/",
+                    referer=referer,
+                    label=f"likers_p{page}",
+                    params=params or None,
+                )
+            except Exception as exc:
+                logger.warning("likers недоступны: %s", exc)
+                break
+
+            users = data.get("users") or []
+            likers.extend(users)
+            max_id = data.get("next_max_id")
+            if not max_id or not users:
+                break
+
+        return likers
 
     async def fetch_highlight(self, highlight_id: str) -> dict[str, Any]:
         return await self.graphql(

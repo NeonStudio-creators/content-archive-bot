@@ -36,12 +36,15 @@ class Settings:
     platform_base_url: str = "https://www.instagram.com"
     graphql_endpoint: str = "https://www.instagram.com/api/graphql"
 
-    # «Тихий» режим — задержки и лимиты
-    request_delay_sec: float = 1.5
+    # «Тихий» режим — задержки, потоки и лимиты
+    request_delay_sec: float = 0.8
+    max_concurrent_requests: int = 6
     max_retries: int = 3
     retry_backoff_sec: float = 2.0
-    pagination_page_size: int = 12
-    max_pagination_pages: int = 50
+    pagination_page_size: int = 24
+    max_pagination_pages: int = 100
+    comments_page_size: int = 50
+    max_comment_pages: int = 20
 
     # Telegram-лимиты
     max_media_per_message: int = 10
@@ -70,11 +73,14 @@ class Settings:
             platform_base_url=os.getenv(
                 "PLATFORM_BASE_URL", "https://www.instagram.com"
             ).rstrip("/"),
-            request_delay_sec=float(os.getenv("REQUEST_DELAY_SEC", "1.5")),
+            request_delay_sec=float(os.getenv("REQUEST_DELAY_SEC", "0.8")),
+            max_concurrent_requests=int(os.getenv("MAX_CONCURRENT_REQUESTS", "6")),
             max_retries=int(os.getenv("MAX_RETRIES", "3")),
             retry_backoff_sec=float(os.getenv("RETRY_BACKOFF_SEC", "2.0")),
-            pagination_page_size=int(os.getenv("PAGINATION_PAGE_SIZE", "12")),
-            max_pagination_pages=int(os.getenv("MAX_PAGINATION_PAGES", "50")),
+            pagination_page_size=int(os.getenv("PAGINATION_PAGE_SIZE", "24")),
+            max_pagination_pages=int(os.getenv("MAX_PAGINATION_PAGES", "100")),
+            comments_page_size=int(os.getenv("COMMENTS_PAGE_SIZE", "50")),
+            max_comment_pages=int(os.getenv("MAX_COMMENT_PAGES", "20")),
         )
 
 

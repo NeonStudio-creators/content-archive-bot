@@ -4,6 +4,7 @@ ArchiveOrchestrator — координирует полный цикл сбор�
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from config import Settings
@@ -25,7 +26,10 @@ class ArchiveOrchestrator:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.auth = SessionAuthManager(settings)
-        self.rate_limiter = QuietRateLimiter(settings.request_delay_sec)
+        self.rate_limiter = QuietRateLimiter(
+            settings.request_delay_sec,
+            settings.max_concurrent_requests,
+        )
         self.fetcher = GraphQLFetcher(settings, self.auth, self.rate_limiter)
         self.parser = EntityDeepCollector()
 
@@ -75,10 +79,19 @@ class ArchiveOrchestrator:
 
         user_id = str(user.get("id", ""))
         post_edges: list = []
-        if user_id and not user.get("is_private"):
-            post_edges = await self.fetcher.fetch_user_posts(user_id)
+        reel_edges: list = []
+        tagged_edges: list = []
 
-        return self.parser.parse_profile(resolved, profile_data, post_edges)
+        if user_id and not user.get("is_private"):
+            post_edges, reel_edges, tagged_edges = await asyncio.gather(
+                self.fetcher.fetch_user_posts(user_id),
+                self.fetcher.fetch_user_reels(user_id),
+                self.fetcher.fetch_user_tagged(user_id),
+            )
+
+        return self.parser.parse_profile(
+            resolved, profile_data, post_edges, reel_edges, tagged_edges
+        )
 
     async def _collect_publication(self, resolved: ResolvedLink) -> ArchiveBundle:
         shortcode = resolved.identifiers["shortcode"]
@@ -92,16 +105,42 @@ class ArchiveOrchestrator:
             raise ValueError(f"Публикация {shortcode} не найдена")
 
         media_id = str(media_node.get("id", ""))
-        comment_edges: list = []
-        if media_id:
-            try:
-                comment_edges = await self.fetcher.fetch_media_comments(
-                    media_id, shortcode
-                )
-            except Exception as exc:
-                logger.warning("Комментарии недоступны для %s: %s", shortcode, exc)
+        owner_username = (media_node.get("owner") or {}).get("username", "")
 
-        return self.parser.parse_publication(resolved, media_data, comment_edges)
+        comment_edges: list = []
+        likers: list = []
+        owner_profile: dict | None = None
+
+        if media_id:
+            tasks = [
+                self.fetcher.fetch_media_comments(media_id, shortcode),
+                self.fetcher.fetch_media_likers(media_id, shortcode),
+            ]
+            if owner_username:
+                tasks.append(self.fetcher.fetch_web_profile(owner_username))
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            if not isinstance(results[0], BaseException):
+                comment_edges = results[0]
+            else:
+                logger.warning("Комментарии: %s", results[0])
+
+            if len(results) > 1 and not isinstance(results[1], BaseException):
+                likers = results[1]
+            elif len(results) > 1:
+                logger.warning("Лайки: %s", results[1])
+
+            if len(results) > 2 and not isinstance(results[2], BaseException):
+                owner_profile = results[2]
+
+        return self.parser.parse_publication(
+            resolved,
+            media_data,
+            comment_edges,
+            likers=likers,
+            owner_profile=owner_profile,
+        )
 
     async def _collect_story(self, resolved: ResolvedLink) -> ArchiveBundle:
         # Stories через web_profile с include_reel
