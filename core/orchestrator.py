@@ -82,7 +82,10 @@ class ArchiveOrchestrator:
 
     async def _collect_publication(self, resolved: ResolvedLink) -> ArchiveBundle:
         shortcode = resolved.identifiers["shortcode"]
-        media_data = await self.fetcher.fetch_media_info(shortcode)
+        media_data = await self.fetcher.fetch_media_info(
+            shortcode,
+            original_url=resolved.original_url,
+        )
 
         media_node = media_data.get("data", {}).get("shortcode_media")
         if not media_node:

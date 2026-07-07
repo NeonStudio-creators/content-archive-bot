@@ -24,7 +24,12 @@ class SessionAuthManager:
             cookies["csrftoken"] = self.settings.csrf_token
         return cookies
 
-    def build_headers(self, referer: str | None = None) -> dict[str, str]:
+    def build_headers(
+        self,
+        referer: str | None = None,
+        *,
+        api_type: str = "web",
+    ) -> dict[str, str]:
         csrf = self.settings.csrf_token or self.settings.session_token[:32]
         headers = {
             "User-Agent": self.settings.user_agent,
@@ -32,12 +37,16 @@ class SessionAuthManager:
             "Accept-Language": "en-US,en;q=0.9",
             "X-CSRFToken": csrf,
             "X-IG-App-ID": "936619743392459",
-            "X-ASBD-ID": "129477",
+            "X-ASBD-ID": "359341",
+            "X-IG-WWW-Claim": "0",
+            "Origin": self.settings.platform_base_url,
             "X-Requested-With": "XMLHttpRequest",
             "Sec-Fetch-Site": "same-origin",
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Dest": "empty",
         }
+        if api_type == "mobile":
+            headers["X-IG-App-ID"] = "936619743392459"
         if referer:
             headers["Referer"] = referer
         else:

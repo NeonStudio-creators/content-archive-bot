@@ -171,8 +171,9 @@ class EntityDeepCollector:
     ) -> ArchiveBundle:
         media_node = (
             media_data.get("data", {}).get("shortcode_media")
-            or media_data.get("shortcode_media")
             or media_data.get("data", {}).get("xdt_shortcode_media")
+            or media_data.get("shortcode_media")
+            or media_data.get("xdt_shortcode_media")
             or {}
         )
 

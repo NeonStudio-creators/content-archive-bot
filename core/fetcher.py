@@ -15,7 +15,13 @@ import aiohttp
 
 from config import Settings
 from core.auth import SessionAuthManager
+from core.media_adapter import (
+    from_embedded_json,
+    from_graphql_polaris,
+    from_rest_media_info,
+)
 from core.models import EntityType
+from utils.instagram_id import shortcode_to_media_id
 from utils.rate_limit import QuietRateLimiter
 from utils.retry import with_retry
 
@@ -25,11 +31,14 @@ logger = logging.getLogger(__name__)
 DOC_IDS = {
     "user_profile": "25025320fc2a3a4c0da3e2ee7b81bce8",
     "user_posts": "0033d8c4fa3a17f23b88bd3ac1c55e5b",
-    "media_info": "17880173348408341",
+    # Актуальный doc_id (media_id, не shortcode) — Polaris 2025+
+    "media_info": "27130156389949648",
     "media_comments": "97b41c299c4654e3ad9531e2d966a90a",
     "story_viewer": "ad99dd9d3646cc3c0dda65deb29b92a0",
     "highlight": "45246d3fe16ccc6577e0eb1a2397fb74",
 }
+
+MOBILE_API_BASE = "https://i.instagram.com/api/v1"
 
 # ── Паттерны URL для LinkResolver ──────────────────────────────────────────
 URL_PATTERNS: list[tuple[re.Pattern[str], EntityType, str]] = [
@@ -172,6 +181,7 @@ class GraphQLFetcher:
 
     def __post_init__(self) -> None:
         self._session: aiohttp.ClientSession | None = None
+        self._lsd_token: str | None = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -183,40 +193,41 @@ class GraphQLFetcher:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    async def graphql(
+    async def _request(
         self,
-        doc_id: str,
-        variables: dict[str, Any],
+        method: str,
+        url: str,
         *,
         referer: str | None = None,
-        label: str = "graphql",
-    ) -> dict[str, Any]:
-        """Одиночный GraphQL-запрос с ретраями и rate-limit."""
-
-        async def _do_request() -> dict[str, Any]:
+        label: str = "request",
+        params: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        api_type: str = "web",
+    ) -> dict[str, Any] | str:
+        async def _do_request() -> dict[str, Any] | str:
             await self.rate_limiter.wait()
             session = await self._get_session()
-
-            params = {
-                "doc_id": doc_id,
-                "variables": json.dumps(variables, separators=(",", ":")),
-            }
-            headers = self.auth.build_headers(referer=referer)
+            headers = self.auth.build_headers(referer=referer, api_type=api_type)
             cookies = self.auth.build_cookies()
 
-            async with session.get(
-                self.settings.graphql_endpoint,
+            async with session.request(
+                method,
+                url,
                 params=params,
+                data=data,
                 headers=headers,
                 cookies=cookies,
             ) as resp:
-                if resp.status == 429:
-                    resp.raise_for_status()
                 body = await resp.text()
                 if resp.status >= 400:
-                    logger.error("GraphQL %s: HTTP %s — %s", label, resp.status, body[:300])
+                    logger.warning(
+                        "%s: HTTP %s — %s", label, resp.status, body[:300]
+                    )
                     resp.raise_for_status()
-                return json.loads(body)
+                try:
+                    return json.loads(body)
+                except json.JSONDecodeError:
+                    return body
 
         return await with_retry(
             _do_request,
@@ -224,6 +235,69 @@ class GraphQLFetcher:
             backoff_sec=self.settings.retry_backoff_sec,
             label=label,
         )
+
+    async def graphql(
+        self,
+        doc_id: str,
+        variables: dict[str, Any],
+        *,
+        referer: str | None = None,
+        label: str = "graphql",
+        method: str = "GET",
+    ) -> dict[str, Any]:
+        """GraphQL-запрос (GET или POST) с ретраями."""
+
+        variables_json = json.dumps(variables, separators=(",", ":"))
+
+        if method.upper() == "POST":
+            form: dict[str, str] = {
+                "doc_id": doc_id,
+                "variables": variables_json,
+                "server_timestamps": "true",
+            }
+            if self._lsd_token:
+                form["lsd"] = self._lsd_token
+            result = await self._request(
+                "POST",
+                self.settings.graphql_endpoint,
+                referer=referer,
+                label=label,
+                data=form,
+            )
+        else:
+            result = await self._request(
+                "GET",
+                self.settings.graphql_endpoint,
+                referer=referer,
+                label=label,
+                params={"doc_id": doc_id, "variables": variables_json},
+            )
+
+        if isinstance(result, dict):
+            return result
+        raise ValueError(f"GraphQL {label}: невалидный JSON-ответ")
+
+    async def mobile_api_get(
+        self,
+        path: str,
+        *,
+        referer: str | None = None,
+        label: str = "mobile_api",
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Запрос к i.instagram.com/api/v1 (работает с sessionid)."""
+        url = f"{MOBILE_API_BASE}{path}"
+        result = await self._request(
+            "GET",
+            url,
+            referer=referer,
+            label=label,
+            params=params,
+            api_type="mobile",
+        )
+        if isinstance(result, dict):
+            return result
+        raise ValueError(f"Mobile API {label}: невалидный JSON")
 
     async def fetch_paginated(
         self,
@@ -292,13 +366,128 @@ class GraphQLFetcher:
             label="user_posts",
         )
 
-    async def fetch_media_info(self, shortcode: str) -> dict[str, Any]:
-        """Метаданные одной публикации."""
-        return await self.graphql(
-            DOC_IDS["media_info"],
-            {"shortcode": shortcode},
-            referer=f"{self.settings.platform_base_url}/p/{shortcode}/",
-            label="media_info",
+    def _publication_referer(self, shortcode: str, original_url: str | None = None) -> str:
+        if original_url and "instagram.com" in original_url:
+            return original_url.split("?")[0]
+        return f"{self.settings.platform_base_url}/reel/{shortcode}/"
+
+    async def _fetch_media_via_rest(
+        self, shortcode: str, media_id: str, referer: str
+    ) -> dict[str, Any] | None:
+        try:
+            payload = await self.mobile_api_get(
+                f"/media/{media_id}/info/",
+                referer=referer,
+                label="media_info_rest",
+            )
+            result = from_rest_media_info(payload, shortcode)
+            if result:
+                logger.info("media_info: REST API OK для %s", shortcode)
+                return result
+        except Exception as exc:
+            logger.warning("media_info REST failed для %s: %s", shortcode, exc)
+        return None
+
+    async def _fetch_media_via_graphql(
+        self, shortcode: str, media_id: str, referer: str
+    ) -> dict[str, Any] | None:
+        try:
+            payload = await self.graphql(
+                DOC_IDS["media_info"],
+                {"media_id": media_id},
+                referer=referer,
+                label="media_info_graphql",
+                method="POST",
+            )
+            result = from_graphql_polaris(payload, shortcode)
+            if result:
+                logger.info("media_info: GraphQL OK для %s", shortcode)
+                return result
+            # Старый формат shortcode_media
+            node = payload.get("data", {}).get("shortcode_media")
+            if node:
+                return {"data": {"shortcode_media": node}}
+        except Exception as exc:
+            logger.warning("media_info GraphQL failed для %s: %s", shortcode, exc)
+        return None
+
+    async def _fetch_media_via_html(
+        self, shortcode: str, referer: str
+    ) -> dict[str, Any] | None:
+        try:
+            html = await self._request(
+                "GET",
+                referer,
+                referer=referer,
+                label="media_info_html",
+            )
+            if not isinstance(html, str):
+                return None
+
+            # application/json в <script>
+            for match in re.finditer(
+                r'<script[^>]*type="application/json"[^>]*>(\{.+?\})</script>',
+                html,
+                re.DOTALL,
+            ):
+                try:
+                    blob = json.loads(match.group(1))
+                    result = from_embedded_json(blob, shortcode)
+                    if result:
+                        logger.info("media_info: HTML JSON OK для %s", shortcode)
+                        return result
+                except json.JSONDecodeError:
+                    continue
+
+            # xdt_api / shortcode_media в тексте страницы
+            for pattern in (
+                r'"shortcode_media"\s*:\s*(\{.+?\})\s*,\s*"',
+                r'"xdt_shortcode_media"\s*:\s*(\{.+?\})\s*,\s*"',
+            ):
+                match = re.search(pattern, html)
+                if match:
+                    try:
+                        node = json.loads(match.group(1))
+                        return {"data": {"shortcode_media": node}}
+                    except json.JSONDecodeError:
+                        continue
+        except Exception as exc:
+            logger.warning("media_info HTML failed для %s: %s", shortcode, exc)
+        return None
+
+    async def fetch_media_info(
+        self,
+        shortcode: str,
+        *,
+        original_url: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Метаданные публикации — каскад стратегий:
+        1. REST i.instagram.com/api/v1/media/{id}/info/
+        2. GraphQL POST с media_id (новый doc_id)
+        3. Парсинг HTML страницы
+        """
+        media_id = shortcode_to_media_id(shortcode)
+        referer = self._publication_referer(shortcode, original_url)
+        logger.info(
+            "media_info %s → media_id=%s, referer=%s",
+            shortcode,
+            media_id,
+            referer,
+        )
+
+        for fetcher in (
+            self._fetch_media_via_rest(shortcode, media_id, referer),
+            self._fetch_media_via_graphql(shortcode, media_id, referer),
+            self._fetch_media_via_html(shortcode, referer),
+        ):
+            result = await fetcher
+            if result:
+                return result
+
+        raise ValueError(
+            f"Публикация {shortcode} недоступна. "
+            "Проверьте SESSION_TOKEN и CSRF_TOKEN — возможно, сессия истекла."
         )
 
     async def fetch_media_comments(
