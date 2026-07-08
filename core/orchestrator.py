@@ -18,11 +18,6 @@ from utils.rate_limit import QuietRateLimiter
 logger = logging.getLogger(__name__)
 
 
-def _edge_count_profile(node: dict, edge_key: str) -> int | None:
-    count = safe_dict(node.get(edge_key)).get("count")
-    return count if isinstance(count, int) else None
-
-
 def _post_engagement(edge: dict) -> int:
     node = safe_dict(edge.get("node"))
     likes = safe_dict(node.get("edge_liked_by")).get("count") or 0
@@ -66,6 +61,35 @@ class ArchiveOrchestrator:
         )
         return self.parser.parse_publication(resolved, media_data)
 
+    async def _collect_author_profile(
+        self,
+        shortcode: str,
+        *,
+        original_url: str | None = None,
+    ) -> ArchiveBundle:
+        """Полный сбор профиля автора публикации."""
+        url = original_url or f"https://www.instagram.com/p/{shortcode}/"
+        media_data = await self.fetcher.fetch_media_info(
+            shortcode,
+            original_url=url,
+        )
+        pub_resolved = ResolvedLink(
+            original_url=url,
+            entity_type=EntityType.PUBLICATION,
+            identifiers={"shortcode": shortcode},
+        )
+        pub_bundle = self.parser.parse_publication(pub_resolved, media_data)
+        username = pub_bundle.metadata.username
+        if not username:
+            raise ValueError("Не удалось определить автора публикации")
+
+        profile_resolved = ResolvedLink(
+            original_url=f"https://www.instagram.com/{username}/",
+            entity_type=EntityType.PROFILE,
+            identifiers={"username": username},
+        )
+        return await self._collect_profile(profile_resolved)
+
     async def process_publication_deep(
         self,
         shortcode: str,
@@ -73,7 +97,17 @@ class ArchiveOrchestrator:
         *,
         original_url: str | None = None,
     ) -> ArchiveBundle:
-        """Глубокий сбор по кнопке: profile | audio | video | hq."""
+        """Глубокий сбор по кнопке: prof | aud | vid | hq."""
+        if not self.auth.is_configured():
+            raise RuntimeError("SESSION_TOKEN не настроен")
+
+        await self.fetcher.ensure_session()
+
+        if mode == "prof":
+            return await self._collect_author_profile(
+                shortcode, original_url=original_url
+            )
+
         url = original_url or f"https://www.instagram.com/p/{shortcode}/"
         resolved = ResolvedLink(
             original_url=url,
@@ -81,63 +115,14 @@ class ArchiveOrchestrator:
             identifiers={"shortcode": shortcode},
         )
 
-        if not self.auth.is_configured():
-            raise RuntimeError("SESSION_TOKEN не настроен")
-
-        await self.fetcher.ensure_session()
-
-        if mode == "video":
+        if mode == "vid":
             return await self._collect_publication(resolved)
 
         media_data = await self.fetcher.fetch_media_info(
             shortcode,
             original_url=resolved.original_url,
         )
-        bundle = self.parser.parse_publication(resolved, media_data)
-
-        if mode == "profile":
-            owner_username = bundle.metadata.username
-            if owner_username:
-                try:
-                    owner_profile = await self.fetcher.fetch_web_profile(
-                        owner_username
-                    )
-                    owner_user = safe_dict(dig(owner_profile, "data", "user"))
-                    if owner_user:
-                        m = bundle.metadata
-                        m.follower_count = _edge_count_profile(
-                            owner_user, "edge_followed_by"
-                        )
-                        m.following_count = _edge_count_profile(
-                            owner_user, "edge_follow"
-                        )
-                        m.publication_count = _edge_count_profile(
-                            owner_user, "edge_owner_to_timeline_media"
-                        )
-                        m.biography = owner_user.get("biography")
-                        m.display_name = (
-                            owner_user.get("full_name") or m.display_name
-                        )
-                        m.is_verified = bool(owner_user.get("is_verified"))
-                        m.is_private = bool(owner_user.get("is_private"))
-                        m.external_url = owner_user.get("external_url")
-                        m.avatar_url = (
-                            owner_user.get("profile_pic_url_hd")
-                            or owner_user.get("profile_pic_url")
-                        )
-                        m.raw_fields.update({
-                            "owner_bio": owner_user.get("biography"),
-                            "owner_category": owner_user.get("category"),
-                            "owner_is_business": owner_user.get(
-                                "is_business_account"
-                            ),
-                            "owner_pronouns": owner_user.get("pronouns"),
-                            "owner_bio_links": owner_user.get("bio_links"),
-                        })
-                except Exception as exc:
-                    logger.warning("Профиль автора %s: %s", owner_username, exc)
-
-        return bundle
+        return self.parser.parse_publication(resolved, media_data)
 
     async def process_url(self, url: str) -> ArchiveBundle:
         """Полный пайплайн обработки одной ссылки."""

@@ -38,7 +38,7 @@ class TelegramPresenter:
     """Минималистичное оформление отчётов для Telegram."""
 
     BRAND = "ContentExplorer"
-    VERSION = "1.3.0"
+    VERSION = "1.3.1"
 
     PUB_MODES = {
         "prof": "Профиль автора",
@@ -1238,7 +1238,7 @@ class TelegramPresenter:
         bundle: ArchiveBundle,
         mode: str,
     ) -> None:
-        if mode == "vid":
+        if mode in ("vid", "prof"):
             await self.send_archive(bot, message, bundle)
             return
 

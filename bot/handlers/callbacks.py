@@ -42,9 +42,14 @@ def setup_callbacks(
         label = presenter.PUB_MODES[mode]
         await callback.answer(f"Собираю: {label}…")
 
+        detail = (
+            "посты, reels, отметки, сторис…"
+            if mode == "prof"
+            else label.lower()
+        )
         status = await callback.message.answer(
             f"<b>{presenter.BRAND}</b>\n\n"
-            f"Собираю <b>{label.lower()}</b>…\n"
+            f"Собираю <b>{detail}</b>…\n"
             f"<code>{shortcode}</code>",
             parse_mode="HTML",
         )
