@@ -45,6 +45,8 @@ class Settings:
     max_pagination_pages: int = 100
     comments_page_size: int = 50
     max_comment_pages: int = 20
+    profile_enrich_top_posts: int = 5
+    profile_max_highlights_fetch: int = 5
 
     # Telegram-лимиты
     max_media_per_message: int = 10
@@ -81,6 +83,12 @@ class Settings:
             max_pagination_pages=int(os.getenv("MAX_PAGINATION_PAGES", "100")),
             comments_page_size=int(os.getenv("COMMENTS_PAGE_SIZE", "50")),
             max_comment_pages=int(os.getenv("MAX_COMMENT_PAGES", "20")),
+            profile_enrich_top_posts=int(
+                os.getenv("PROFILE_ENRICH_TOP_POSTS", "5")
+            ),
+            profile_max_highlights_fetch=int(
+                os.getenv("PROFILE_MAX_HIGHLIGHTS_FETCH", "5")
+            ),
         )
 
 

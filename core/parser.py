@@ -63,6 +63,117 @@ def _best_image(node: dict[str, Any]) -> str | None:
     ) or resources[-1].get("url")
 
 
+def _parse_mobile_media_item(item: dict[str, Any]) -> MediaAsset | None:
+    """MediaAsset из mobile API (pk, code, image_versions2)."""
+    pk = item.get("pk") or item.get("id")
+    if not pk:
+        return None
+
+    media_type = item.get("media_type", 1)
+    is_video = media_type == 2 or bool(item.get("video_versions"))
+
+    url: str | None = None
+    thumb: str | None = None
+    width = height = None
+
+    if is_video and item.get("video_versions"):
+        best = item["video_versions"][-1]
+        url = best.get("url")
+        width = best.get("width")
+        height = best.get("height")
+    candidates = safe_dict(item.get("image_versions2")).get("candidates", [])
+    if candidates:
+        best_img = max(
+            candidates,
+            key=lambda c: c.get("width", 0) * c.get("height", 0),
+        )
+        thumb = best_img.get("url")
+        if not url:
+            url = thumb
+            width = best_img.get("width")
+            height = best_img.get("height")
+
+    cap = item.get("caption")
+    caption = cap.get("text") if isinstance(cap, dict) else cap
+
+    return MediaAsset(
+        id=str(pk),
+        media_type="video" if is_video else "image",
+        url=url or "",
+        width=width,
+        height=height,
+        thumbnail_url=thumb,
+        duration_sec=item.get("video_duration"),
+        caption=caption,
+        taken_at=_ts(item.get("taken_at")),
+        extra={
+            "shortcode": item.get("code"),
+            "product_type": item.get("product_type"),
+            "source": "mobile_api",
+        },
+    )
+
+
+def _parse_edge_media(node: dict[str, Any]) -> list[MediaAsset]:
+    """Универсальный парсер узла поста (GraphQL или mobile)."""
+    if node.get("pk") or (node.get("code") and not node.get("shortcode")):
+        asset = _parse_mobile_media_item(node)
+        return [asset] if asset else []
+    return _parse_media_node(node)
+
+
+def _parse_story_item(item: dict[str, Any]) -> MediaAsset | None:
+    is_video = item.get("media_type") == 2
+    url = item.get("video_url") if is_video else _best_image(item)
+    if not url:
+        return None
+    return MediaAsset(
+        id=str(item.get("pk", "")),
+        media_type="video" if is_video else "image",
+        url=url,
+        taken_at=_ts(item.get("taken_at")),
+        extra={"story_type": item.get("story_cta"), "source": "story"},
+    )
+
+
+def _parse_profile_stories(
+    profile_data: dict[str, Any], username: str
+) -> tuple[list[MediaAsset], list[RelationEdge]]:
+    """Активные сторис из ответа fetch_web_profile (include_reel=True)."""
+    reels = safe_dict(dig(profile_data, "data", "user")).get(
+        "reel"
+    ) or profile_data.get("data", {}).get(
+        "xdt_api__v1__feed__reels_media", {}
+    )
+    if isinstance(reels, dict) and "items" in reels:
+        reel_list = [reels]
+    elif isinstance(reels, dict):
+        reel_list = list(reels.values())
+    else:
+        reel_list = []
+
+    media: list[MediaAsset] = []
+    relations: list[RelationEdge] = []
+
+    for reel in reel_list:
+        if not isinstance(reel, dict):
+            continue
+        owner = safe_dict(reel.get("user")).get("username") or username
+        for item in reel.get("items", []) or []:
+            asset = _parse_story_item(item)
+            if asset:
+                media.append(asset)
+                relations.append(
+                    RelationEdge(
+                        relation_type="story",
+                        target_id=asset.id,
+                        target_label=owner,
+                        metadata={"expires_at": item.get("expiring_at")},
+                    )
+                )
+    return media, relations
+
+
 def _parse_media_node(node: dict[str, Any]) -> list[MediaAsset]:
     """Извлекает MediaAsset из узла публикации (включая карусели)."""
     assets: list[MediaAsset] = []
@@ -134,15 +245,33 @@ class EntityDeepCollector:
         post_edges: list[dict[str, Any]],
         reel_edges: list[dict[str, Any]] | None = None,
         tagged_edges: list[dict[str, Any]] | None = None,
+        highlight_edges: list[dict[str, Any]] | None = None,
+        highlight_media: list[MediaAsset] | None = None,
+        extra_activity: list[ActivityRecord] | None = None,
+        raw_responses: list[dict[str, Any]] | None = None,
     ) -> ArchiveBundle:
         user = safe_dict(dig(profile_data, "data", "user")) or safe_dict(
             profile_data.get("user")
         )
+        username = user.get("username") or resolved.identifiers.get("username", "")
+
+        bio_links_raw = user.get("bio_links") or []
+        bio_links = []
+        for link in bio_links_raw:
+            if isinstance(link, dict):
+                bio_links.append(
+                    {
+                        "url": link.get("url") or link.get("lynx_url"),
+                        "title": link.get("title") or link.get("link_type"),
+                    }
+                )
+            elif isinstance(link, str):
+                bio_links.append({"url": link, "title": None})
 
         metadata = EntityMetadata(
             entity_id=str(user.get("id", "")),
             entity_type=EntityType.PROFILE,
-            username=user.get("username"),
+            username=username,
             display_name=user.get("full_name"),
             avatar_url=user.get("profile_pic_url_hd") or user.get("profile_pic_url"),
             follower_count=_edge_count(user, "edge_followed_by", "count"),
@@ -153,62 +282,145 @@ class EntityDeepCollector:
             external_url=user.get("external_url"),
             biography=user.get("biography"),
             raw_fields={
-                "category": user.get("category_name"),
+                "category": user.get("category_name") or user.get("category"),
                 "business_email": user.get("business_email"),
+                "business_phone": user.get("business_phone_number"),
                 "is_business": user.get("is_business_account"),
                 "is_professional": user.get("is_professional_account"),
                 "pronouns": user.get("pronouns"),
-                "bio_links": [
-                    l.get("url") for l in user.get("bio_links", [])
-                ],
+                "bio_links": bio_links,
                 "highlight_reel_count": user.get("highlight_reel_count"),
+                "reels_total": _edge_count(
+                    user, "edge_felix_video_timeline", "count"
+                ),
+                "tagged_total": _edge_count(
+                    user, "edge_user_to_photos_of_you", "count"
+                ),
+                "has_active_story": bool(
+                    safe_dict(user.get("reel")).get("has_reel_media_to_watch")
+                    or user.get("has_ar_effects")
+                ),
+                "mutual_followers_count": user.get("mutual_followers_count"),
+                "is_joined_recently": user.get("is_joined_recently"),
             },
         )
 
         media: list[MediaAsset] = []
         relations: list[RelationEdge] = []
 
+        avatar_url = metadata.avatar_url
+        if avatar_url:
+            media.append(
+                MediaAsset(
+                    id=f"avatar_{metadata.entity_id}",
+                    media_type="image",
+                    url=avatar_url,
+                    extra={"source": "avatar"},
+                )
+            )
+
+        story_media, story_relations = _parse_profile_stories(
+            profile_data, username
+        )
+        media.extend(story_media)
+        relations.extend(story_relations)
+
+        if highlight_media:
+            media.extend(highlight_media)
+
+        total_likes = 0
+        total_comments = 0
+        total_views = 0
+
         for edge in post_edges:
             node = safe_dict(edge.get("node"))
-            media.extend(_parse_media_node(node))
+            media.extend(_parse_edge_media(node))
+            likes = _edge_count(node, "edge_liked_by", "count") or 0
+            comments = _edge_count(node, "edge_media_to_comment", "count") or 0
+            views = node.get("video_view_count") or 0
+            total_likes += likes
+            total_comments += comments
+            total_views += views
             relations.append(
                 RelationEdge(
                     relation_type="publication",
                     target_id=str(node.get("id", "")),
                     target_label=node.get("shortcode", ""),
                     metadata={
-                        "likes": _edge_count(node, "edge_liked_by", "count"),
-                        "comments": _edge_count(node, "edge_media_to_comment", "count"),
+                        "likes": likes,
+                        "comments": comments,
+                        "views": views,
+                        "caption": (_caption_text(node) or "")[:120],
+                        "is_video": node.get("is_video"),
                     },
                 )
             )
 
         for edge in reel_edges or []:
             node = safe_dict(edge.get("node"))
-            media.extend(_parse_media_node(node))
+            media.extend(_parse_edge_media(node))
+            likes = _edge_count(node, "edge_liked_by", "count") or 0
+            comments = _edge_count(node, "edge_media_to_comment", "count") or 0
+            views = node.get("video_view_count") or 0
+            total_likes += likes
+            total_comments += comments
+            total_views += views
             relations.append(
                 RelationEdge(
                     relation_type="reel",
                     target_id=str(node.get("id", "")),
                     target_label=node.get("shortcode", ""),
-                    metadata={"product_type": node.get("product_type")},
+                    metadata={
+                        "product_type": node.get("product_type"),
+                        "likes": likes,
+                        "comments": comments,
+                        "views": views,
+                        "caption": (_caption_text(node) or "")[:120],
+                    },
                 )
             )
 
         for edge in tagged_edges or []:
             node = safe_dict(edge.get("node"))
+            media.extend(_parse_edge_media(node))
+            owner = safe_dict(node.get("owner")).get("username") or safe_dict(
+                node.get("user")
+            ).get("username")
             relations.append(
                 RelationEdge(
                     relation_type="tagged_in",
-                    target_id=str(node.get("id", "")),
-                    target_label=node.get("shortcode", ""),
+                    target_id=str(node.get("id", node.get("pk", ""))),
+                    target_label=node.get("shortcode", node.get("code", "")),
                     metadata={
-                        "owner": safe_dict(node.get("owner")).get("username"),
+                        "owner": owner,
+                        "likes": _edge_count(node, "edge_liked_by", "count")
+                        or node.get("like_count"),
                     },
                 )
             )
 
-        # Связанные аккаунты
+        for edge in highlight_edges or []:
+            node = safe_dict(edge.get("node"))
+            hid = str(node.get("id", ""))
+            relations.append(
+                RelationEdge(
+                    relation_type="highlight",
+                    target_id=hid,
+                    target_label=node.get("title", hid),
+                    metadata={
+                        "cover_url": (
+                            safe_dict(node.get("cover_media")).get(
+                                "thumbnail_src"
+                            )
+                            or safe_dict(
+                                node.get("cover_media_cropped_thumbnail")
+                            ).get("url")
+                        ),
+                        "items_count": node.get("media_count"),
+                    },
+                )
+            )
+
         for edge in safe_dict(user.get("edge_related_profiles")).get("edges", []):
             rel_user = safe_dict(edge.get("node"))
             relations.append(
@@ -220,18 +432,37 @@ class EntityDeepCollector:
                 )
             )
 
+        metadata.raw_fields["aggregate_likes"] = total_likes
+        metadata.raw_fields["aggregate_comments"] = total_comments
+        metadata.raw_fields["aggregate_views"] = total_views
+
+        graphql_archive = [profile_data]
+        if raw_responses:
+            graphql_archive.extend(raw_responses)
+
         return ArchiveBundle(
             source_url=resolved.original_url,
             resolved_type=EntityType.PROFILE,
             metadata=metadata,
             media=media,
             relations=relations,
-            raw_graphql=[profile_data],
+            activity=extra_activity or [],
+            raw_graphql=graphql_archive,
             collection_stats={
                 "posts_collected": len(post_edges),
                 "reels_collected": len(reel_edges or []),
                 "tagged_collected": len(tagged_edges or []),
+                "stories_collected": len(story_media),
+                "highlights_collected": len(highlight_edges or []),
+                "highlight_items": len(highlight_media or []),
+                "related_profiles": sum(
+                    1 for r in relations if r.relation_type == "related_profile"
+                ),
                 "media_files": len(media),
+                "comments_sampled": sum(
+                    1 for a in (extra_activity or [])
+                    if a.activity_type == "comment"
+                ),
             },
         )
 

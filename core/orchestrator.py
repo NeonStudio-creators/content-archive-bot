@@ -10,12 +10,18 @@ import logging
 from config import Settings
 from core.auth import SessionAuthManager
 from core.fetcher import GraphQLFetcher, LinkResolver, ResolvedLink
-from core.models import ArchiveBundle, EntityType
-from core.parser import EntityDeepCollector
+from core.models import ActivityRecord, ArchiveBundle, EntityType, MediaAsset
+from core.parser import EntityDeepCollector, _parse_story_item
 from utils.dict_utils import dig, safe_dict
 from utils.rate_limit import QuietRateLimiter
 
 logger = logging.getLogger(__name__)
+
+
+def _post_engagement(edge: dict) -> int:
+    node = safe_dict(edge.get("node"))
+    likes = safe_dict(node.get("edge_liked_by")).get("count") or 0
+    return int(likes) if likes else 0
 
 
 class ArchiveOrchestrator:
@@ -67,6 +73,93 @@ class ArchiveOrchestrator:
 
         return await handler(resolved)
 
+    async def _enrich_top_posts_comments(
+        self, post_edges: list
+    ) -> list[ActivityRecord]:
+        """Комментарии к топ-N постам по лайкам."""
+        limit = self.settings.profile_enrich_top_posts
+        if limit <= 0 or not post_edges:
+            return []
+
+        top = sorted(post_edges, key=_post_engagement, reverse=True)[:limit]
+        tasks: list = []
+        meta: list[tuple[str, str]] = []
+
+        for edge in top:
+            node = safe_dict(edge.get("node"))
+            media_id = str(node.get("id", ""))
+            shortcode = node.get("shortcode", "")
+            if media_id and shortcode:
+                tasks.append(
+                    self.fetcher.fetch_media_comments(media_id, shortcode)
+                )
+                meta.append((shortcode, media_id))
+
+        if not tasks:
+            return []
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        activity: list[ActivityRecord] = []
+
+        for (shortcode, _), result in zip(meta, results):
+            if isinstance(result, BaseException):
+                logger.warning("Комментарии %s: %s", shortcode, result)
+                continue
+            for edge in result[:15]:
+                comment = safe_dict(edge.get("node"))
+                activity.append(
+                    ActivityRecord(
+                        activity_type="comment",
+                        actor=safe_dict(comment.get("owner")).get("username"),
+                        content=comment.get("text"),
+                        extra={
+                            "post_shortcode": shortcode,
+                            "likes": safe_dict(
+                                comment.get("edge_liked_by")
+                            ).get("count", 0),
+                        },
+                    )
+                )
+
+        return activity
+
+    async def _fetch_highlights_media(
+        self, highlight_edges: list
+    ) -> list[MediaAsset]:
+        """Скачивает элементы первых N highlights."""
+        limit = self.settings.profile_max_highlights_fetch
+        if limit <= 0 or not highlight_edges:
+            return []
+
+        tasks = []
+        highlight_ids: list[str] = []
+        for edge in highlight_edges[:limit]:
+            hid = str(safe_dict(edge.get("node")).get("id", ""))
+            if hid:
+                tasks.append(self.fetcher.fetch_highlight_items(hid))
+                highlight_ids.append(hid)
+
+        if not tasks:
+            return []
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        media: list[MediaAsset] = []
+
+        for hid, result in zip(highlight_ids, results):
+            if isinstance(result, BaseException):
+                logger.warning("Highlight %s: %s", hid, result)
+                continue
+            title, items = result
+            for item in items:
+                asset = _parse_story_item(item)
+                if asset:
+                    asset.extra["highlight_id"] = hid
+                    asset.extra["highlight_title"] = title
+                    asset.extra["source"] = "highlight"
+                    media.append(asset)
+
+        return media
+
     async def _collect_profile(self, resolved: ResolvedLink) -> ArchiveBundle:
         username = resolved.identifiers["username"]
         profile_data = await self.fetcher.fetch_web_profile(username)
@@ -82,16 +175,40 @@ class ArchiveOrchestrator:
         post_edges: list = []
         reel_edges: list = []
         tagged_edges: list = []
+        highlight_edges: list = []
+        highlight_media: list[MediaAsset] = []
+        extra_activity: list[ActivityRecord] = []
 
         if user_id and not user.get("is_private"):
-            post_edges, reel_edges, tagged_edges = await asyncio.gather(
+            (
+                post_edges,
+                reel_edges,
+                tagged_edges,
+                highlight_edges,
+            ) = await asyncio.gather(
                 self.fetcher.fetch_user_posts(user_id),
                 self.fetcher.fetch_user_reels(user_id),
                 self.fetcher.fetch_user_tagged(user_id),
+                self.fetcher.fetch_user_highlights(user_id),
+            )
+
+            enrich_task = self._enrich_top_posts_comments(post_edges)
+            highlights_task = self._fetch_highlights_media(highlight_edges)
+            extra_activity, highlight_media = await asyncio.gather(
+                enrich_task,
+                highlights_task,
             )
 
         return self.parser.parse_profile(
-            resolved, profile_data, post_edges, reel_edges, tagged_edges
+            resolved,
+            profile_data,
+            post_edges,
+            reel_edges,
+            tagged_edges,
+            highlight_edges=highlight_edges,
+            highlight_media=highlight_media,
+            extra_activity=extra_activity,
+            raw_responses=[],
         )
 
     async def _collect_publication(self, resolved: ResolvedLink) -> ArchiveBundle:
@@ -150,7 +267,6 @@ class ArchiveOrchestrator:
         )
 
     async def _collect_story(self, resolved: ResolvedLink) -> ArchiveBundle:
-        # Stories через web_profile с include_reel
         username = resolved.identifiers["username"]
         profile_data = await self.fetcher.fetch_web_profile(username)
         return self.parser.parse_story(resolved, profile_data)
@@ -161,7 +277,6 @@ class ArchiveOrchestrator:
         return self.parser.parse_highlight(resolved, data)
 
     async def _collect_collection(self, resolved: ResolvedLink) -> ArchiveBundle:
-        # Коллекции saved — через посты пользователя (упрощённый путь)
         username = resolved.identifiers["username"]
         profile_data = await self.fetcher.fetch_web_profile(username)
         user = safe_dict(dig(profile_data, "data", "user"))

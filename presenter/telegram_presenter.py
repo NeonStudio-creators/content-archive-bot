@@ -38,7 +38,28 @@ class TelegramPresenter:
     """Минималистичное оформление отчётов для Telegram."""
 
     BRAND = "ContentExplorer"
-    VERSION = "1.1.0"
+    VERSION = "1.2.0"
+
+    STAT_LABELS = {
+        "posts_collected": "Постов собрано",
+        "reels_collected": "Reels собрано",
+        "tagged_collected": "Отметок собрано",
+        "stories_collected": "Сторис собрано",
+        "highlights_collected": "Актуального",
+        "highlight_items": "Элементов актуального",
+        "related_profiles": "Похожих аккаунтов",
+        "media_files": "Медиафайлов",
+        "comments_sampled": "Комментариев (топ-посты)",
+    }
+
+    REL_LABELS = {
+        "publication": "пост",
+        "reel": "reel",
+        "tagged_in": "отметка",
+        "highlight": "актуальное",
+        "related_profile": "похожий",
+        "story": "сторис",
+    }
 
     TYPE_LABEL = {
         EntityType.PROFILE: "Профиль",
@@ -105,13 +126,18 @@ class TelegramPresenter:
         m = bundle.metadata
 
         if m.username:
+            label = (
+                "Профиль"
+                if bundle.resolved_type == EntityType.PROFILE
+                else "Автор"
+            )
             buttons.append(
                 InlineKeyboardButton(
-                    text="Автор",
+                    text=label,
                     url=self._profile_url(m.username),
                 )
             )
-        if bundle.source_url:
+        if bundle.source_url and bundle.resolved_type != EntityType.PROFILE:
             label = "Видео" if any(
                 a.media_type == "video" for a in bundle.media
             ) else "Пост"
@@ -254,15 +280,363 @@ class TelegramPresenter:
         return [q for q in quotes if q]
 
     def _pick_preview_media(self, bundle: ArchiveBundle) -> MediaAsset | None:
-        valid = [m for m in bundle.media if m.url and m.url.startswith("http")]
+        valid = [
+            m for m in bundle.media
+            if m.url and m.url.startswith("http")
+        ]
         if not valid:
+            if bundle.metadata.avatar_url:
+                return MediaAsset(
+                    id="avatar",
+                    media_type="image",
+                    url=bundle.metadata.avatar_url,
+                )
             return None
+
+        if bundle.resolved_type == EntityType.PROFILE:
+            for asset in valid:
+                if asset.extra.get("source") == "avatar":
+                    return asset
+            if bundle.metadata.avatar_url:
+                return MediaAsset(
+                    id="avatar",
+                    media_type="image",
+                    url=bundle.metadata.avatar_url,
+                )
+
         for asset in valid:
             if asset.media_type == "video":
                 return asset
         return valid[0]
 
+    def _post_url(self, shortcode: str) -> str:
+        return f"{self._ig_base}/p/{shortcode}/"
+
+    def _reel_url(self, shortcode: str) -> str:
+        return f"{self._ig_base}/reel/{shortcode}/"
+
+    def _format_profile_report(self, bundle: ArchiveBundle) -> str:
+        m = bundle.metadata
+        extra = m.raw_fields or {}
+        parts: list[str] = [self._header(bundle)]
+
+        # ── Профиль ──
+        profile_lines: list[str] = []
+        if m.username:
+            profile_lines.append(
+                self._kv("Ник", self._profile_link(m.username))
+            )
+        if m.display_name:
+            profile_lines.append(
+                self._kv(
+                    "Имя",
+                    self._profile_link(m.username, m.display_name)
+                    if m.username
+                    else th.esc(m.display_name),
+                )
+            )
+        if m.entity_id:
+            profile_lines.append(
+                self._kv("ID", f"<code>{th.esc(m.entity_id)}</code>")
+            )
+        flags: list[str] = []
+        if m.is_verified:
+            flags.append("верифицирован")
+        if m.is_private:
+            flags.append("приватный")
+        if extra.get("is_business"):
+            flags.append("бизнес")
+        if extra.get("is_professional"):
+            flags.append("профи")
+        if extra.get("is_joined_recently"):
+            flags.append("новый аккаунт")
+        if flags:
+            profile_lines.append(
+                self._kv("Статус", th.esc(", ".join(flags)))
+            )
+        if extra.get("category"):
+            profile_lines.append(
+                self._kv("Категория", th.esc(str(extra["category"])))
+            )
+        pronouns = extra.get("pronouns")
+        if pronouns:
+            text = (
+                ", ".join(pronouns)
+                if isinstance(pronouns, list)
+                else str(pronouns)
+            )
+            profile_lines.append(self._kv("Местоимения", th.esc(text)))
+        if extra.get("business_email"):
+            profile_lines.append(
+                self._kv("Email", th.esc(extra["business_email"]))
+            )
+        if extra.get("business_phone"):
+            profile_lines.append(
+                self._kv("Телефон", th.esc(extra["business_phone"]))
+            )
+        if m.external_url:
+            profile_lines.append(
+                self._kv(
+                    "Сайт",
+                    f'<a href="{th.href(m.external_url)}">{th.esc(m.external_url[:50])}</a>',
+                )
+            )
+        parts.append(self._section("Профиль"))
+        parts.extend(line + "\n" for line in profile_lines)
+
+        # ── О себе (цитаты) ──
+        quotes: list[str] = []
+        if m.biography:
+            quotes.append(self._quote(m.biography, max_len=700))
+        for link in (extra.get("bio_links") or [])[:5]:
+            if isinstance(link, dict):
+                url = link.get("url")
+                title = link.get("title") or url
+                if url:
+                    quotes.append(
+                        self._quote(
+                            f"{title}: {url}" if title != url else url,
+                            max_len=200,
+                        )
+                    )
+            elif isinstance(link, str):
+                quotes.append(self._quote(link, max_len=200))
+        if quotes:
+            parts.append(self._section("О себе"))
+            parts.extend(quotes)
+
+        # ── Статистика ──
+        stat_lines: list[str] = []
+        if m.follower_count is not None:
+            stat_lines.append(
+                self._kv("Подписчики", f"<b>{m.follower_count:,}</b>")
+            )
+        if m.following_count is not None:
+            stat_lines.append(
+                self._kv("Подписки", f"<b>{m.following_count:,}</b>")
+            )
+        if m.publication_count is not None:
+            stat_lines.append(
+                self._kv("Публикации", f"<b>{m.publication_count:,}</b>")
+            )
+        if extra.get("reels_total") is not None:
+            stat_lines.append(
+                self._kv("Reels", f"<b>{extra['reels_total']:,}</b>")
+            )
+        if extra.get("tagged_total") is not None:
+            stat_lines.append(
+                self._kv("Отметки", f"<b>{extra['tagged_total']:,}</b>")
+            )
+        if extra.get("highlight_reel_count") is not None:
+            stat_lines.append(
+                self._kv(
+                    "Актуальное",
+                    f"<b>{extra['highlight_reel_count']}</b>",
+                )
+            )
+        if extra.get("aggregate_likes"):
+            stat_lines.append(
+                self._kv(
+                    "Сумма лайков",
+                    f"<b>{extra['aggregate_likes']:,}</b>",
+                )
+            )
+        if extra.get("aggregate_views"):
+            stat_lines.append(
+                self._kv(
+                    "Сумма просмотров",
+                    f"<b>{extra['aggregate_views']:,}</b>",
+                )
+            )
+        if stat_lines:
+            parts.append(self._section("Статистика"))
+            parts.extend(line + "\n" for line in stat_lines)
+
+        # ── Сбор данных ──
+        if bundle.collection_stats:
+            coll_lines: list[str] = []
+            for k, v in bundle.collection_stats.items():
+                label = self.STAT_LABELS.get(k, k)
+                coll_lines.append(self._kv(label, f"<b>{v}</b>"))
+            parts.append(self._section("Сбор данных"))
+            parts.extend(line + "\n" for line in coll_lines)
+
+        # ── Сторис ──
+        stories = [
+            r for r in bundle.relations if r.relation_type == "story"
+        ]
+        if stories:
+            parts.append(self._section("Сторис"))
+            parts.append(
+                self._kv("Активных", f"<b>{len(stories)}</b>") + "\n"
+            )
+
+        # ── Актуальное ──
+        highlights = [
+            r for r in bundle.relations if r.relation_type == "highlight"
+        ]
+        if highlights:
+            hl_lines: list[str] = [
+                self._kv("Собрано", f"<b>{len(highlights)}</b>")
+            ]
+            for hl in highlights[:6]:
+                title = hl.target_label or hl.target_id
+                count = (hl.metadata or {}).get("items_count")
+                suffix = f" · {count} шт." if count else ""
+                hl_lines.append(f"  {th.esc(title)}{suffix}")
+            if len(highlights) > 6:
+                hl_lines.append(f"  +{len(highlights) - 6} ещё")
+            parts.append(self._section("Актуальное"))
+            parts.extend(line + "\n" for line in hl_lines)
+
+        # ── Топ посты ──
+        posts = sorted(
+            [r for r in bundle.relations if r.relation_type == "publication"],
+            key=lambda r: (r.metadata or {}).get("likes", 0),
+            reverse=True,
+        )
+        if posts:
+            top_lines: list[str] = []
+            for rel in posts[:6]:
+                sc = rel.target_label
+                meta = rel.metadata or {}
+                likes = meta.get("likes", 0)
+                comments = meta.get("comments", 0)
+                cap = meta.get("caption", "")
+                link = (
+                    f'<a href="{th.href(self._post_url(sc))}">{th.esc(sc)}</a>'
+                    if sc
+                    else "—"
+                )
+                top_lines.append(
+                    f"  {link} · ❤ {likes:,} · 💬 {comments:,}"
+                )
+                if cap:
+                    top_lines.append(
+                        f"  <i>{th.esc(cap[:80])}</i>"
+                    )
+            if len(posts) > 6:
+                top_lines.append(f"  +{len(posts) - 6} постов в JSON")
+            parts.append(self._section("Топ посты"))
+            parts.extend(line + "\n" for line in top_lines)
+
+        # ── Reels ──
+        reels = sorted(
+            [r for r in bundle.relations if r.relation_type == "reel"],
+            key=lambda r: (r.metadata or {}).get("views", 0),
+            reverse=True,
+        )
+        if reels:
+            reel_lines: list[str] = [
+                self._kv("Собрано", f"<b>{len(reels)}</b>")
+            ]
+            for rel in reels[:5]:
+                sc = rel.target_label
+                meta = rel.metadata or {}
+                views = meta.get("views", 0)
+                likes = meta.get("likes", 0)
+                link = (
+                    f'<a href="{th.href(self._reel_url(sc))}">{th.esc(sc)}</a>'
+                    if sc
+                    else "—"
+                )
+                reel_lines.append(
+                    f"  {link} · 👁 {views:,} · ❤ {likes:,}"
+                )
+            if len(reels) > 5:
+                reel_lines.append(f"  +{len(reels) - 5} reels в JSON")
+            parts.append(self._section("Reels"))
+            parts.extend(line + "\n" for line in reel_lines)
+
+        # ── Отметки ──
+        tagged = [
+            r for r in bundle.relations if r.relation_type == "tagged_in"
+        ]
+        if tagged:
+            tag_lines: list[str] = [
+                self._kv("Собрано", f"<b>{len(tagged)}</b>")
+            ]
+            for rel in tagged[:5]:
+                owner = (rel.metadata or {}).get("owner")
+                sc = rel.target_label
+                post_link = (
+                    f'<a href="{th.href(self._post_url(sc))}">{th.esc(sc)}</a>'
+                    if sc
+                    else "—"
+                )
+                owner_link = self._profile_link(owner) if owner else "—"
+                tag_lines.append(f"  {post_link} · {owner_link}")
+            if len(tagged) > 5:
+                tag_lines.append(f"  +{len(tagged) - 5} в JSON")
+            parts.append(self._section("Отметки"))
+            parts.extend(line + "\n" for line in tag_lines)
+
+        # ── Похожие аккаунты ──
+        related = [
+            r
+            for r in bundle.relations
+            if r.relation_type == "related_profile"
+        ]
+        if related:
+            rel_lines: list[str] = []
+            for rel in related[:8]:
+                verified = " ✓" if (rel.metadata or {}).get("is_verified") else ""
+                rel_lines.append(
+                    f"  {self._profile_link(rel.target_label)}{verified}"
+                )
+            parts.append(self._section("Похожие"))
+            parts.extend(line + "\n" for line in rel_lines)
+
+        # ── Комментарии (топ-посты) ──
+        comments = [
+            a for a in bundle.activity if a.activity_type == "comment"
+        ]
+        if comments:
+            comment_lines: list[str] = []
+            for act in comments[:10]:
+                actor = self._actor_link(act.actor)
+                post = (act.extra or {}).get("post_shortcode", "")
+                text = (act.content or "").strip()
+                prefix = f"[{post}] " if post else ""
+                if text:
+                    comment_lines.append(
+                        f"{actor}: {th.esc(prefix + text[:100])}"
+                    )
+            if comment_lines:
+                parts.append(self._section("Комментарии"))
+                parts.append(
+                    f"<blockquote>{chr(10).join(comment_lines)}</blockquote>\n"
+                )
+
+        # ── Медиа ──
+        downloadable = [
+            a for a in bundle.media
+            if a.url and a.url.startswith("http")
+            and a.extra.get("source") != "avatar"
+        ]
+        if downloadable:
+            media_lines: list[str] = [
+                self._kv("Файлов", f"<b>{len(downloadable)}</b>")
+            ]
+            for i, asset in enumerate(downloadable[:8], 1):
+                src = asset.extra.get("source", asset.media_type)
+                kind = "видео" if asset.media_type == "video" else "фото"
+                media_lines.append(
+                    f'  <a href="{th.href(asset.url)}">#{i}</a> · {kind} · {th.esc(str(src))}'
+                )
+            if len(downloadable) > 8:
+                media_lines.append(
+                    f"  +{len(downloadable) - 8} в JSON"
+                )
+            parts.append(self._section("Медиа"))
+            parts.extend(line + "\n" for line in media_lines)
+
+        parts.append(self._footer())
+        return th.truncate_html("".join(parts), TG_MAX_LENGTH)
+
     def format_full_report(self, bundle: ArchiveBundle) -> str:
+        if bundle.resolved_type == EntityType.PROFILE:
+            return self._format_profile_report(bundle)
         m = bundle.metadata
         owner_extra = m.raw_fields or {}
 

@@ -40,7 +40,8 @@ DOC_IDS = {
     "story_viewer": "ad99dd9d3646cc3c0dda65deb29b92a0",
     "highlight": "45246d3fe16ccc6577e0eb1a2397fb74",
     "user_reels": "2c4c2e343a8a60aac790633715402e11",
-    "user_tagged": "e8f3c2a4e8b5a0e7e8b5a0e7e8b5a0e7",
+    "user_tagged": "e31a871f7301132ceaab56507a66bbb7",
+    "user_highlights": "7c16654f22c819fb63d1183034a5162f",
 }
 
 MOBILE_API_BASE = "https://i.instagram.com/api/v1"
@@ -78,6 +79,14 @@ URL_PATTERNS: list[tuple[re.Pattern[str], EntityType, str]] = [
         ),
         EntityType.COLLECTION,
         "collection",
+    ),
+    (
+        re.compile(
+            r"(?:https?://)?(?:www\.)?instagram\.com/([A-Za-z0-9_.]+)/(?:reels|tagged)/?$",
+            re.I,
+        ),
+        EntityType.PROFILE,
+        "username",
     ),
     (
         re.compile(
@@ -394,8 +403,76 @@ class GraphQLFetcher:
                 label="user_tagged",
             )
         except Exception as exc:
-            logger.warning("user_tagged недоступны: %s", exc)
+            logger.warning("user_tagged GraphQL: %s", exc)
+
+        try:
+            return await self._fetch_tagged_mobile(user_id)
+        except Exception as exc:
+            logger.warning("user_tagged mobile: %s", exc)
             return []
+
+    async def _fetch_tagged_mobile(self, user_id: str) -> list[dict[str, Any]]:
+        """Fallback: отметки через mobile API."""
+        edges: list[dict[str, Any]] = []
+        max_id: str | None = None
+
+        for page in range(self.settings.max_pagination_pages):
+            params: dict[str, str] = {}
+            if max_id:
+                params["max_id"] = max_id
+
+            data = await self.mobile_api_get(
+                f"/usertags/{user_id}/feed/",
+                label=f"tagged_mobile_p{page}",
+                params=params or None,
+            )
+            items = data.get("items") or []
+            for item in items:
+                edges.append({"node": item})
+
+            max_id = data.get("next_max_id")
+            if not max_id or not items:
+                break
+
+        return edges
+
+    async def fetch_user_highlights(self, user_id: str) -> list[dict[str, Any]]:
+        """Список актуального (highlights) профиля."""
+        try:
+            data = await self.graphql(
+                DOC_IDS["user_highlights"],
+                {
+                    "user_id": user_id,
+                    "include_chaining": False,
+                    "include_reel": False,
+                    "include_highlight_reels": True,
+                },
+                label="user_highlights",
+            )
+            user = safe_dict(data.get("data", {})).get("user")
+            return safe_dict(safe_dict(user).get("edge_highlight_reels")).get(
+                "edges", []
+            ) or []
+        except Exception as exc:
+            logger.warning("user_highlights недоступны: %s", exc)
+            return []
+
+    async def fetch_highlight_items(
+        self, highlight_id: str
+    ) -> tuple[str | None, list[dict[str, Any]]]:
+        """Элементы одного highlight. Возвращает (title, items)."""
+        try:
+            data = await self.fetch_highlight(highlight_id)
+            connection = safe_dict(
+                data.get("data", {})
+            ).get("xdt_api__v1__feed__reels_media__connection", {})
+            for edge in connection.get("edges", []) or []:
+                node = safe_dict(edge.get("node"))
+                if str(node.get("id", "")) == highlight_id:
+                    return node.get("title"), node.get("items", []) or []
+        except Exception as exc:
+            logger.warning("highlight %s: %s", highlight_id, exc)
+        return None, []
 
     def _publication_referer(self, shortcode: str, original_url: str | None = None) -> str:
         if original_url and "instagram.com" in original_url:
