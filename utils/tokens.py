@@ -17,3 +17,13 @@ def normalize_csrf_token(raw: str) -> str:
     if token.lower().startswith("csrftoken="):
         token = token.split("=", 1)[1].split(";")[0].strip()
     return unquote(token)
+
+
+def extract_ds_user_id(session_id: str) -> str | None:
+    """Первая часть sessionid до ':' — ds_user_id для cookies."""
+    decoded = unquote(session_id.strip())
+    if ":" in decoded:
+        return decoded.split(":", 1)[0]
+    if "%3A" in session_id.lower():
+        return unquote(session_id).split(":", 1)[0]
+    return None

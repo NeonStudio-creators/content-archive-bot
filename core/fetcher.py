@@ -49,13 +49,13 @@ DOC_IDS = {
     "user_profile": "26762473490008061",
     "user_profile_by_username": "26347858941511777",
     "user_profile_legacy": "25025320fc2a3a4c0da3e2ee7b81bce8",
-    "user_posts": "0033d8c4fa3a17f23b88bd3ac1c55e5b",
+    "user_posts": "7898261790222653",
     # Актуальный doc_id (media_id, не shortcode) — Polaris 2025+
     "media_info": "27130156389949648",
     "media_comments": "97b41c299c4654e3ad9531e2d966a90a",
     "story_viewer": "ad99dd9d3646cc3c0dda65deb29b92a0",
     "highlight": "45246d3fe16ccc6577e0eb1a2397fb74",
-    "user_reels": "2c4c2e343a8a60aac790633715402e11",
+    "user_reels": "7845543455542541",
     "user_tagged": "e31a871f7301132ceaab56507a66bbb7",
     "user_highlights": "7c16654f22c819fb63d1183034a5162f",
 }
@@ -278,11 +278,16 @@ class GraphQLFetcher:
         data: dict[str, Any] | None = None,
         api_type: str = "web",
         extra_headers: dict[str, str] | None = None,
+        for_graphql: bool = False,
     ) -> dict[str, Any] | str:
         async def _do_request() -> dict[str, Any] | str:
             await self.rate_limiter.wait()
             session = await self._get_session()
-            headers = self.auth.build_headers(referer=referer, api_type=api_type)
+            headers = self.auth.build_headers(
+                referer=referer,
+                api_type=api_type,
+                for_graphql=for_graphql,
+            )
             if extra_headers:
                 headers.update(extra_headers)
             cookies = self.auth.build_cookies()
@@ -320,12 +325,16 @@ class GraphQLFetcher:
         *,
         referer: str | None = None,
         label: str = "graphql",
-        method: str = "GET",
+        method: str = "POST",
         extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """GraphQL-запрос (GET или POST) с ретраями."""
+        """GraphQL-запрос (POST по умолчанию)."""
 
         variables_json = json.dumps(variables, separators=(",", ":"))
+
+        gql_headers = dict(extra_headers or {})
+        if self._lsd_token:
+            gql_headers["X-FB-LSD"] = self._lsd_token
 
         if method.upper() == "POST":
             form: dict[str, str] = {
@@ -341,7 +350,8 @@ class GraphQLFetcher:
                 referer=referer,
                 label=label,
                 data=form,
-                extra_headers=extra_headers,
+                extra_headers=gql_headers,
+                for_graphql=True,
             )
         else:
             result = await self._request(
@@ -350,7 +360,7 @@ class GraphQLFetcher:
                 referer=referer,
                 label=label,
                 params={"doc_id": doc_id, "variables": variables_json},
-                extra_headers=extra_headers,
+                extra_headers=gql_headers,
             )
 
         if isinstance(result, dict):
@@ -406,6 +416,7 @@ class GraphQLFetcher:
                 vars_page,
                 referer=referer,
                 label=f"{label}_page_{page}",
+                method="POST",
             )
 
             node: Any = data.get("data", data)
@@ -443,13 +454,25 @@ class GraphQLFetcher:
         self, username: str, referer: str
     ) -> dict[str, Any] | None:
         try:
-            payload = await self._request(
-                "GET",
+            await self.rate_limiter.wait()
+            session = await self._get_session()
+            headers = self.auth.build_web_api_headers(referer)
+            cookies = self.auth.build_cookies()
+            async with session.get(
                 f"{self.settings.platform_base_url}/api/v1/users/web_profile_info/",
-                referer=referer,
-                label="profile_web_api",
                 params={"username": username},
-            )
+                headers=headers,
+                cookies=cookies,
+            ) as resp:
+                body = await resp.text()
+                if resp.status >= 400:
+                    logger.warning(
+                        "profile_web_api: HTTP %s — %s",
+                        resp.status,
+                        body[:300],
+                    )
+                    return None
+                payload = json.loads(body)
             if not isinstance(payload, dict):
                 return None
             if payload.get("status") == "fail":
@@ -663,17 +686,60 @@ class GraphQLFetcher:
             "(F12 → Application → Cookies)."
         )
 
+    async def _fetch_user_posts_mobile(
+        self, user_id: str
+    ) -> list[dict[str, Any]]:
+        """Посты через mobile feed/user (без GraphQL)."""
+        edges: list[dict[str, Any]] = []
+        max_id: str | None = None
+
+        for page in range(self.settings.max_pagination_pages):
+            params: dict[str, str] = {
+                "count": str(self.settings.pagination_page_size),
+            }
+            if max_id:
+                params["max_id"] = max_id
+
+            data = await self.mobile_api_get(
+                f"/feed/user/{user_id}/",
+                label=f"user_posts_mobile_p{page}",
+                params=params,
+            )
+            items = data.get("items") or []
+            for item in items:
+                edges.append({"node": item})
+
+            max_id = data.get("next_max_id")
+            if not max_id or not items:
+                break
+
+        return edges
+
     async def fetch_user_posts(self, user_id: str) -> list[dict[str, Any]]:
-        """Публикации профиля с пагинацией."""
-        return await self.fetch_paginated(
-            DOC_IDS["user_posts"],
-            {
-                "id": user_id,
-                "first": self.settings.pagination_page_size,
-            },
-            edges_path=["user", "edge_owner_to_timeline_media"],
-            label="user_posts",
-        )
+        """Публикации профиля — GraphQL POST, fallback mobile feed."""
+        try:
+            edges = await self.fetch_paginated(
+                DOC_IDS["user_posts"],
+                {
+                    "id": user_id,
+                    "first": self.settings.pagination_page_size,
+                },
+                edges_path=["user", "edge_owner_to_timeline_media"],
+                label="user_posts",
+            )
+            if edges:
+                return edges
+        except Exception as exc:
+            logger.warning("user_posts GraphQL: %s", exc)
+
+        try:
+            edges = await self._fetch_user_posts_mobile(user_id)
+            if edges:
+                logger.info("user_posts: mobile feed OK, %d items", len(edges))
+            return edges
+        except Exception as exc:
+            logger.warning("user_posts mobile: %s", exc)
+            return []
 
     async def fetch_user_reels(self, user_id: str) -> list[dict[str, Any]]:
         """Reels профиля."""

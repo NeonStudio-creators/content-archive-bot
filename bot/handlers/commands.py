@@ -77,11 +77,20 @@ def setup_commands(orchestrator: ArchiveOrchestrator) -> Router:
             f"CSRF_TOKEN · {'OK' if csrf else 'нет — добавьте в Railway'}",
         ]
         try:
-            data = await orchestrator.fetcher.fetch_web_profile("instagram")
-            user = data.get("data", {}).get("user", {})
-            lines.append(
-                f"Тест API · OK (@{user.get('username', 'instagram')})"
+            data = await orchestrator.fetcher._fetch_profile_via_web_api(
+                "instagram",
+                orchestrator.fetcher._profile_referer("instagram"),
             )
+            if data:
+                user = data.get("data", {}).get("user", {})
+                lines.append(
+                    f"Тест API · OK (@{user.get('username', 'instagram')})"
+                )
+            else:
+                lines.append(
+                    "Тест API · web_profile_info не ответил — "
+                    "проверьте SESSION_TOKEN и CSRF_TOKEN"
+                )
         except Exception as exc:
             lines.append(f"Тест API · ошибка: {exc}")
         await message.answer("\n".join(lines), parse_mode="HTML")

@@ -62,7 +62,8 @@ def setup_link_handler(
                 if "400" in err and "Bad Request" in err:
                     err = (
                         "Instagram отклонил запрос (400). "
-                        "Обновите SESSION_TOKEN и CSRF_TOKEN в Railway."
+                        "Проверьте /session — нужны свежие sessionid и csrftoken "
+                        "из одного браузера (F12 → Cookies → instagram.com)."
                     )
                 await status_msg.edit_text(
                     f"❌ {err}",

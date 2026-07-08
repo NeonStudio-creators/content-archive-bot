@@ -5,11 +5,17 @@ SessionAuthManager — управление авторизацией через 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+
 from config import Settings
-from utils.tokens import normalize_csrf_token, normalize_session_token
+from utils.tokens import (
+    extract_ds_user_id,
+    normalize_csrf_token,
+    normalize_session_token,
+)
 
 MOBILE_APP_ID = "567067343352427"
 WEB_APP_ID = "936619743392459"
+WEB_ASBD_ID = "129477"
 
 MOBILE_USER_AGENT = (
     "Instagram 385.0.0.47.74 Android (34/14; 480dpi; 1344x2992; "
@@ -44,6 +50,9 @@ class SessionAuthManager:
         csrf = self.get_csrf_token()
         if csrf:
             cookies["csrftoken"] = csrf
+        ds_uid = extract_ds_user_id(self.session_id)
+        if ds_uid:
+            cookies["ds_user_id"] = ds_uid
         cookies.update(self._runtime_cookies)
         cookies["sessionid"] = self.session_id
         return cookies
@@ -53,6 +62,7 @@ class SessionAuthManager:
         referer: str | None = None,
         *,
         api_type: str = "web",
+        for_graphql: bool = False,
     ) -> dict[str, str]:
         csrf = self.get_csrf_token()
         if api_type == "mobile":
@@ -74,22 +84,49 @@ class SessionAuthManager:
                 "Accept": "*/*",
                 "Accept-Language": "en-US,en;q=0.9",
                 "X-IG-App-ID": WEB_APP_ID,
-                "X-ASBD-ID": "359341",
+                "X-ASBD-ID": WEB_ASBD_ID,
                 "X-IG-WWW-Claim": "0",
                 "Origin": self.settings.platform_base_url,
                 "X-Requested-With": "XMLHttpRequest",
                 "Sec-Fetch-Site": "same-origin",
                 "Sec-Fetch-Mode": "cors",
                 "Sec-Fetch-Dest": "empty",
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
             }
 
         if csrf:
             headers["X-CSRFToken"] = csrf
 
+        if for_graphql:
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+            headers["X-FB-Friendly-Name"] = "PolarisAPI"
+
         if referer:
             headers["Referer"] = referer
         else:
             headers["Referer"] = f"{self.settings.platform_base_url}/"
+        return headers
+
+    def build_web_api_headers(self, referer: str) -> dict[str, str]:
+        """Заголовки для /api/v1/users/web_profile_info/ (как в instagrapi)."""
+        csrf = self.get_csrf_token()
+        headers = {
+            "User-Agent": self.settings.user_agent,
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "X-IG-App-ID": WEB_APP_ID,
+            "X-ASBD-ID": WEB_ASBD_ID,
+            "X-Requested-With": "XMLHttpRequest",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
+            "Referer": referer,
+        }
+        if csrf:
+            headers["X-CSRFToken"] = csrf
         return headers
 
     def is_configured(self) -> bool:

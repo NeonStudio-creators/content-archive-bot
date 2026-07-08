@@ -182,17 +182,22 @@ class ArchiveOrchestrator:
         extra_activity: list[ActivityRecord] = []
 
         if user_id and not user.get("is_private"):
-            (
-                post_edges,
-                reel_edges,
-                tagged_edges,
-                highlight_edges,
-            ) = await asyncio.gather(
+            gathered = await asyncio.gather(
                 self.fetcher.fetch_user_posts(user_id),
                 self.fetcher.fetch_user_reels(user_id),
                 self.fetcher.fetch_user_tagged(user_id),
                 self.fetcher.fetch_user_highlights(user_id),
+                return_exceptions=True,
             )
+            names = ("posts", "reels", "tagged", "highlights")
+            results: list = []
+            for name, item in zip(names, gathered):
+                if isinstance(item, BaseException):
+                    logger.warning("Сбор %s: %s", name, item)
+                    results.append([])
+                else:
+                    results.append(item)
+            post_edges, reel_edges, tagged_edges, highlight_edges = results
 
             enrich_task = self._enrich_top_posts_comments(post_edges)
             highlights_task = self._fetch_highlights_media(highlight_edges)
