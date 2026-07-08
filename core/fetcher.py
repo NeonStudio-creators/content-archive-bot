@@ -23,6 +23,7 @@ from core.media_adapter import (
 )
 from core.models import EntityType
 from utils.concurrency import first_success
+from utils.dict_utils import safe_dict
 from utils.instagram_id import shortcode_to_media_id
 from utils.rate_limit import QuietRateLimiter
 from utils.retry import with_retry
@@ -332,15 +333,15 @@ class GraphQLFetcher:
                 label=f"{label}_page_{page}",
             )
 
-            # Навигация по вложенному пути edges
             node: Any = data.get("data", data)
             for key in edges_path:
-                node = node.get(key, {}) if isinstance(node, dict) else {}
+                node = safe_dict(node).get(key)
 
-            edges = node.get("edges", []) if isinstance(node, dict) else []
+            node = safe_dict(node)
+            edges = node.get("edges", []) or []
             all_edges.extend(edges)
 
-            page_info = node.get("page_info", {}) if isinstance(node, dict) else {}
+            page_info = safe_dict(node.get("page_info"))
             if not page_info.get("has_next_page"):
                 break
             cursor = page_info.get("end_cursor")

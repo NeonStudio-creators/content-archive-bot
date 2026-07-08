@@ -8,6 +8,8 @@ import re
 import xml.etree.ElementTree as ET
 from typing import Any
 
+from utils.dict_utils import safe_dict
+
 
 def _parse_fps(value: str | None) -> float | None:
     if not value:
@@ -138,7 +140,7 @@ def build_video_technical(node: dict[str, Any]) -> dict[str, Any]:
     versions = extract_video_versions(node)
     best = pick_best_version(versions)
 
-    dims = node.get("dimensions") or {}
+    dims = safe_dict(node.get("dimensions"))
     width = (
         (best or {}).get("width")
         or node.get("original_width")
@@ -165,7 +167,7 @@ def build_video_technical(node: dict[str, Any]) -> dict[str, Any]:
     if not fps:
         fps = node.get("video_fps") or node.get("frame_rate")
 
-    clips = node.get("clips_metadata") or {}
+    clips = safe_dict(node.get("clips_metadata"))
     audio = node.get("has_audio")
     if audio is None:
         audio = clips.get("audio_type") != "muted" if clips else None
@@ -197,10 +199,11 @@ def build_video_technical(node: dict[str, Any]) -> dict[str, Any]:
 
     # Музыка / Reels
     music = (
-        clips.get("music_info", {}).get("music_asset_info")
+        safe_dict(clips.get("music_info")).get("music_asset_info")
         or clips.get("original_sound_info")
         or node.get("clips_music_attribution_info")
     )
+    music = safe_dict(music)
     if music:
         tech["music"] = {
             "title": music.get("title") or music.get("song_name"),

@@ -6,9 +6,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from utils.dict_utils import safe_dict
+
 
 def _best_image_from_item(item: dict[str, Any]) -> str | None:
-    candidates = item.get("image_versions2", {}).get("candidates", [])
+    candidates = safe_dict(item.get("image_versions2")).get("candidates", [])
     if candidates:
         best = max(candidates, key=lambda c: c.get("width", 0) * c.get("height", 0))
         return best.get("url")
@@ -17,8 +19,12 @@ def _best_image_from_item(item: dict[str, Any]) -> str | None:
 
 def _rest_item_to_node(item: dict[str, Any], shortcode: str | None = None) -> dict[str, Any]:
     """REST /media/info/ item → узел shortcode_media."""
-    caption = item.get("caption") or {}
-    user = item.get("user") or {}
+    raw_cap = item.get("caption")
+    if isinstance(raw_cap, str):
+        caption = {"text": raw_cap}
+    else:
+        caption = safe_dict(raw_cap)
+    user = safe_dict(item.get("user"))
     code = shortcode or item.get("code") or ""
 
     node: dict[str, Any] = {

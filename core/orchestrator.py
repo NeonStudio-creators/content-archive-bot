@@ -12,6 +12,7 @@ from core.auth import SessionAuthManager
 from core.fetcher import GraphQLFetcher, LinkResolver, ResolvedLink
 from core.models import ArchiveBundle, EntityType
 from core.parser import EntityDeepCollector
+from utils.dict_utils import dig, safe_dict
 from utils.rate_limit import QuietRateLimiter
 
 logger = logging.getLogger(__name__)
@@ -70,7 +71,7 @@ class ArchiveOrchestrator:
         username = resolved.identifiers["username"]
         profile_data = await self.fetcher.fetch_web_profile(username)
 
-        user = profile_data.get("data", {}).get("user", {})
+        user = safe_dict(dig(profile_data, "data", "user"))
         if not user:
             raise ValueError(f"Профиль @{username} не найден или недоступен")
 
@@ -100,12 +101,18 @@ class ArchiveOrchestrator:
             original_url=resolved.original_url,
         )
 
-        media_node = media_data.get("data", {}).get("shortcode_media")
-        if not media_node:
+        data_block = safe_dict(media_data.get("data"))
+        media_node = (
+            data_block.get("shortcode_media")
+            or data_block.get("xdt_shortcode_media")
+            or media_data.get("shortcode_media")
+            or media_data.get("xdt_shortcode_media")
+        )
+        if not media_node or not isinstance(media_node, dict):
             raise ValueError(f"Публикация {shortcode} не найдена")
 
         media_id = str(media_node.get("id", ""))
-        owner_username = (media_node.get("owner") or {}).get("username", "")
+        owner_username = safe_dict(media_node.get("owner")).get("username", "")
 
         comment_edges: list = []
         likers: list = []
@@ -157,7 +164,7 @@ class ArchiveOrchestrator:
         # Коллекции saved — через посты пользователя (упрощённый путь)
         username = resolved.identifiers["username"]
         profile_data = await self.fetcher.fetch_web_profile(username)
-        user = profile_data.get("data", {}).get("user", {})
+        user = safe_dict(dig(profile_data, "data", "user"))
         user_id = str(user.get("id", ""))
 
         edges: list = []
