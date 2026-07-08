@@ -9,7 +9,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from core.fetcher import ResolvedLink
-from core.profile_adapter import extract_avatar_url
+from core.profile_adapter import (
+    extract_avatar_from_profile_payload,
+    extract_avatar_url,
+)
 from core.video_meta import build_video_technical, extract_video_versions, pick_best_version
 from utils.dict_utils import dig, safe_dict
 from core.models import (
@@ -269,7 +272,9 @@ class EntityDeepCollector:
             elif isinstance(link, str):
                 bio_links.append({"url": link, "title": None})
 
-        avatar_url = extract_avatar_url(user)
+        avatar_url = extract_avatar_url(user) or extract_avatar_from_profile_payload(
+            profile_data
+        )
 
         metadata = EntityMetadata(
             entity_id=str(user.get("id", "")),

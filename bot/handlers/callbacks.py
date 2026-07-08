@@ -60,6 +60,8 @@ def setup_callbacks(
                 shortcode,
                 mode,
             )
+            if mode == "prof":
+                await orchestrator._ensure_profile_avatar(bundle)
             if mode == "aud":
                 audio_bytes, filename = (
                     await orchestrator.download_publication_audio(bundle)

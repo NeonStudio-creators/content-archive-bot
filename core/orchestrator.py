@@ -10,6 +10,7 @@ import re
 
 from config import Settings
 from core.audio_meta import extract_audio_sources, url_from_audio_block
+from core.profile_adapter import extract_avatar_from_profile_payload
 from core.auth import SessionAuthManager
 from core.fetcher import GraphQLFetcher, LinkResolver, ResolvedLink
 from core.models import ActivityRecord, ArchiveBundle, EntityType, MediaAsset
@@ -350,6 +351,70 @@ class ArchiveOrchestrator:
 
         return media
 
+    @staticmethod
+    def _upsert_avatar_media(bundle: ArchiveBundle, url: str) -> None:
+        bundle.metadata.avatar_url = url
+        for idx, asset in enumerate(bundle.media):
+            if asset.extra.get("source") == "avatar":
+                bundle.media[idx] = MediaAsset(
+                    id=asset.id,
+                    media_type="image",
+                    url=url,
+                    extra={"source": "avatar"},
+                )
+                return
+        bundle.media.insert(
+            0,
+            MediaAsset(
+                id=f"avatar_{bundle.metadata.entity_id}",
+                media_type="image",
+                url=url,
+                extra={"source": "avatar"},
+            ),
+        )
+
+    async def _ensure_profile_avatar(
+        self,
+        bundle: ArchiveBundle,
+        profile_data: dict | None = None,
+    ) -> None:
+        """Гарантирует URL аватарки в bundle перед отправкой в Telegram."""
+        if bundle.resolved_type != EntityType.PROFILE:
+            return
+
+        sources: list[dict] = []
+        if profile_data:
+            sources.append(profile_data)
+        sources.extend(bundle.raw_graphql or [])
+
+        for payload in sources:
+            url = extract_avatar_from_profile_payload(payload)
+            if url:
+                self._upsert_avatar_media(bundle, url)
+                return
+
+        if bundle.metadata.avatar_url:
+            self._upsert_avatar_media(bundle, bundle.metadata.avatar_url)
+            return
+
+        username = bundle.metadata.username
+        if not username:
+            return
+
+        try:
+            fresh = await self.fetcher.fetch_web_profile(username)
+            url = extract_avatar_from_profile_payload(fresh)
+            if url:
+                self._upsert_avatar_media(bundle, url)
+                if bundle.raw_graphql:
+                    bundle.raw_graphql[0] = fresh
+                else:
+                    bundle.raw_graphql = [fresh]
+        except Exception as exc:
+            logger.warning(
+                "ensure_profile_avatar @%s: %s", username, exc
+            )
+
     async def _collect_profile(self, resolved: ResolvedLink) -> ArchiveBundle:
         username = resolved.identifiers["username"]
         profile_data = await self.fetcher.fetch_web_profile(username)
@@ -418,7 +483,7 @@ class ArchiveOrchestrator:
                     elif name == "highlights":
                         highlight_media = result
 
-        return self.parser.parse_profile(
+        bundle = self.parser.parse_profile(
             resolved,
             profile_data,
             post_edges,
@@ -429,6 +494,8 @@ class ArchiveOrchestrator:
             extra_activity=extra_activity,
             raw_responses=[],
         )
+        await self._ensure_profile_avatar(bundle, profile_data)
+        return bundle
 
     async def _collect_publication(self, resolved: ResolvedLink) -> ArchiveBundle:
         shortcode = resolved.identifiers["shortcode"]

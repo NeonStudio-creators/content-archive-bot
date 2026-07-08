@@ -18,7 +18,10 @@ from aiogram.types import (
 )
 
 from core.models import ArchiveBundle, EntityType, MediaAsset
-from core.profile_adapter import extract_avatar_url
+from core.profile_adapter import (
+    extract_avatar_from_profile_payload,
+    extract_avatar_url,
+)
 from utils import telegram_html as th
 
 if TYPE_CHECKING:
@@ -40,7 +43,7 @@ class TelegramPresenter:
     """Минималистичное оформление отчётов для Telegram."""
 
     BRAND = "ContentExplorer"
-    VERSION = "1.3.3"
+    VERSION = "1.3.4"
 
     PUB_MODES = {
         "prof": "Профиль автора",
@@ -318,12 +321,23 @@ class TelegramPresenter:
             or m.avatar_url
         )
         if not url:
+            for raw in bundle.raw_graphql or []:
+                url = self._normalize_media_url(
+                    extract_avatar_from_profile_payload(raw)
+                )
+                if url:
+                    break
+        if not url:
             for asset in bundle.media:
                 if asset.extra.get("source") == "avatar":
                     url = self._normalize_media_url(asset.url)
                     if url:
                         break
         if not url:
+            logger.warning(
+                "Аватар не найден для @%s",
+                bundle.metadata.username,
+            )
             return None
         return MediaAsset(
             id="avatar",
@@ -1342,46 +1356,57 @@ class TelegramPresenter:
             plain = th.strip_to_plain(safe)
             await message.answer(plain[:4090], reply_markup=keyboard)
 
-    async def _send_photo_preview(
+    async def _send_profile_archive(
         self,
         message: Message,
-        preview: MediaAsset,
-        caption: str,
+        bundle: ArchiveBundle,
+        report: str,
         keyboard: InlineKeyboardMarkup | None,
-        *,
-        referer: str | None = None,
     ) -> bool:
-        """Отправляет фото-превью; при ошибке CDN — скачивает и заливает файлом."""
-        try:
-            await message.answer_photo(
-                photo=preview.url,
-                caption=caption,
-                parse_mode="HTML",
-                reply_markup=keyboard,
-            )
-            return True
-        except TelegramBadRequest as exc:
-            logger.warning("Photo preview error: %s", exc)
-
-        if not self.fetcher:
+        """Профиль: аватар сверху (файлом) + отчёт."""
+        preview = self._profile_avatar_asset(bundle)
+        if not preview:
             return False
 
-        try:
-            data = await self.fetcher.download_bytes(
-                preview.url,
-                referer=referer,
-                label="avatar_download",
-            )
-            await message.answer_photo(
-                photo=BufferedInputFile(data, filename="avatar.jpg"),
-                caption=caption,
-                parse_mode="HTML",
-                reply_markup=keyboard,
-            )
-            return True
-        except Exception as exc:
-            logger.warning("Avatar download upload failed: %s", exc)
-            return False
+        referer = self._profile_url(bundle.metadata.username or "")
+        photo_bytes: bytes | None = None
+        if self.fetcher:
+            try:
+                photo_bytes = await self.fetcher.download_image_bytes(
+                    preview.url,
+                    referer=referer,
+                    label="avatar_download",
+                )
+            except Exception as exc:
+                logger.warning("Avatar download failed: %s", exc)
+
+        caption = th.truncate_html(report, TG_CAPTION_MAX)
+
+        for cap in (caption, ""):
+            if photo_bytes:
+                photo: BufferedInputFile | str = BufferedInputFile(
+                    photo_bytes, filename="avatar.jpg"
+                )
+            else:
+                photo = preview.url
+            try:
+                await message.answer_photo(
+                    photo=photo,
+                    caption=cap or None,
+                    parse_mode="HTML" if cap else None,
+                    reply_markup=keyboard if cap else None,
+                )
+                if not cap:
+                    await self._send_html(message, report, keyboard)
+                return True
+            except TelegramBadRequest as exc:
+                logger.warning("Profile photo send error: %s", exc)
+                photo_bytes = None
+                continue
+            except Exception as exc:
+                logger.warning("Profile photo send failed: %s", exc)
+                return False
+        return False
 
     async def send_archive(
         self,
@@ -1395,63 +1420,43 @@ class TelegramPresenter:
         keyboard = self._build_keyboard(bundle)
 
         sent = False
-        if preview:
-            if bundle.resolved_type == EntityType.PROFILE:
-                sent = await self._send_photo_preview(
-                    message,
-                    preview,
-                    caption,
-                    keyboard,
-                    referer=self._profile_url(bundle.metadata.username or ""),
-                )
-                if not sent:
-                    try:
-                        sent = await self._send_photo_preview(
-                            message,
-                            preview,
-                            "",
-                            keyboard,
-                            referer=self._profile_url(
-                                bundle.metadata.username or ""
-                            ),
-                        )
-                        if sent:
-                            await self._send_html(message, report, keyboard)
-                    except Exception:
-                        pass
-            else:
-                use_photo = preview.media_type != "video"
+        if bundle.resolved_type == EntityType.PROFILE:
+            sent = await self._send_profile_archive(
+                message, bundle, report, keyboard
+            )
+        elif preview:
+            use_photo = preview.media_type != "video"
+            try:
+                if use_photo:
+                    await message.answer_photo(
+                        photo=preview.url,
+                        caption=caption,
+                        parse_mode="HTML",
+                        reply_markup=keyboard,
+                    )
+                else:
+                    await message.answer_video(
+                        video=preview.url,
+                        caption=caption,
+                        parse_mode="HTML",
+                        reply_markup=keyboard,
+                    )
+                sent = True
+            except TelegramBadRequest as exc:
+                logger.warning("Media caption error: %s", exc)
                 try:
                     if use_photo:
                         await message.answer_photo(
-                            photo=preview.url,
-                            caption=caption,
-                            parse_mode="HTML",
-                            reply_markup=keyboard,
+                            preview.url, reply_markup=keyboard
                         )
                     else:
                         await message.answer_video(
-                            video=preview.url,
-                            caption=caption,
-                            parse_mode="HTML",
-                            reply_markup=keyboard,
+                            preview.url, reply_markup=keyboard
                         )
+                    await self._send_html(message, report, keyboard)
                     sent = True
-                except TelegramBadRequest as exc:
-                    logger.warning("Media caption error: %s", exc)
-                    try:
-                        if use_photo:
-                            await message.answer_photo(
-                                preview.url, reply_markup=keyboard
-                            )
-                        else:
-                            await message.answer_video(
-                                preview.url, reply_markup=keyboard
-                            )
-                        await self._send_html(message, report, keyboard)
-                        sent = True
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
 
         if not sent:
             await self._send_html(message, report, keyboard)

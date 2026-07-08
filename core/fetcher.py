@@ -418,33 +418,92 @@ class GraphQLFetcher:
         referer: str | None = None,
         label: str = "download",
     ) -> bytes:
-        """Скачивает бинарный файл (аудио/видео) по прямой ссылке."""
+        """Скачивает бинарный файл по прямой ссылке."""
+        return await self.download_image_bytes(
+            url, referer=referer, label=label
+        )
+
+    @staticmethod
+    def _looks_like_image(data: bytes) -> bool:
+        if len(data) < 128:
+            return False
+        if data[:2] == b"\xff\xd8":
+            return True
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            return True
+        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            return True
+        if data[:3] == b"GIF":
+            return True
+        return data[:1] != b"<"
+
+    async def download_image_bytes(
+        self,
+        url: str,
+        *,
+        referer: str | None = None,
+        label: str = "image_download",
+    ) -> bytes:
+        """Скачивает изображение (аватар) — несколько стратегий заголовков."""
         await self.rate_limiter.wait()
         session = await self._get_session()
-        headers = self.auth.build_headers(referer=referer, api_type="mobile")
-        cookies = self.auth.build_cookies()
+        ref = referer or f"{self.settings.platform_base_url}/"
 
-        async def _do_download() -> bytes:
-            async with session.get(
-                url,
-                headers=headers,
-                cookies=cookies,
-                allow_redirects=True,
-            ) as resp:
-                if resp.status >= 400:
-                    body = await resp.text()
+        attempts: list[tuple[dict[str, str], dict[str, str] | None]] = [
+            (
+                {
+                    "User-Agent": self.settings.user_agent,
+                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                    "Referer": ref,
+                    "Sec-Fetch-Dest": "image",
+                    "Sec-Fetch-Mode": "no-cors",
+                    "Sec-Fetch-Site": "cross-site",
+                },
+                None,
+            ),
+            (
+                self.auth.build_headers(referer=ref, api_type="web"),
+                self.auth.build_cookies(),
+            ),
+            (
+                self.auth.build_headers(referer=ref, api_type="mobile"),
+                self.auth.build_cookies(),
+            ),
+        ]
+
+        last_error: Exception | None = None
+        for headers, cookies in attempts:
+            try:
+                async with session.get(
+                    url,
+                    headers=headers,
+                    cookies=cookies,
+                    allow_redirects=True,
+                ) as resp:
+                    if resp.status >= 400:
+                        body = await resp.text()
+                        logger.warning(
+                            "%s: HTTP %s — %s",
+                            label,
+                            resp.status,
+                            body[:120],
+                        )
+                        continue
+                    data = await resp.read()
+                    if self._looks_like_image(data):
+                        return data
                     logger.warning(
-                        "%s: HTTP %s — %s", label, resp.status, body[:200]
+                        "%s: ответ не похож на изображение (%s байт)",
+                        label,
+                        len(data),
                     )
-                    resp.raise_for_status()
-                return await resp.read()
+            except Exception as exc:
+                last_error = exc
+                logger.warning("%s attempt failed: %s", label, exc)
 
-        return await with_retry(
-            _do_download,
-            max_retries=self.settings.max_retries,
-            backoff_sec=self.settings.retry_backoff_sec,
-            label=label,
-        )
+        if last_error:
+            raise last_error
+        raise ValueError(f"Не удалось скачать изображение: {url[:80]}")
 
     async def fetch_track_audio_asset(
         self,

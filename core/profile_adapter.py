@@ -10,18 +10,38 @@ from typing import Any
 from utils.dict_utils import dig, safe_dict
 
 
+def _is_http_url(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    url = html_module.unescape(value.strip())
+    if url.startswith("//"):
+        return f"https:{url}"
+    if url.startswith("http"):
+        return url
+    return None
+
+
 def extract_avatar_url(user: dict[str, Any]) -> str | None:
     """Достаёт URL аватарки из любого формата ответа API."""
-    for key in ("profile_pic_url_hd", "profile_pic_url"):
-        val = user.get(key)
-        if isinstance(val, str) and val.strip():
-            return val.strip()
+    if not user:
+        return None
+
+    for key in (
+        "profile_pic_url_hd",
+        "profile_pic_url",
+        "hd_profile_pic_url",
+        "profilePicUrl",
+        "profile_pic_url_hd_2025",
+    ):
+        url = _is_http_url(user.get(key))
+        if url:
+            return url
 
     for key in ("hd_profile_pic_url_info", "profile_pic_url_info"):
         info = safe_dict(user.get(key))
-        url = info.get("url")
-        if isinstance(url, str) and url.strip():
-            return url.strip()
+        url = _is_http_url(info.get("url"))
+        if url:
+            return url
 
     for key in ("hd_profile_pic_versions", "profile_pic_versions"):
         versions = user.get(key)
@@ -32,11 +52,71 @@ def extract_avatar_url(user: dict[str, Any]) -> str | None:
             key=lambda v: (safe_dict(v).get("width") or 0)
             * (safe_dict(v).get("height") or 0),
         )
-        url = safe_dict(best).get("url")
-        if isinstance(url, str) and url.strip():
-            return url.strip()
+        url = _is_http_url(safe_dict(best).get("url"))
+        if url:
+            return url
+
+    return _find_avatar_url_deep(user)
+
+
+def _find_avatar_url_deep(
+    obj: Any,
+    *,
+    depth: int = 0,
+    username: str | None = None,
+) -> str | None:
+    """Рекурсивный поиск profile_pic / og:image URL в сыром JSON."""
+    if depth > 12:
+        return None
+
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            key_l = str(key).lower()
+            if key_l in {
+                "profile_pic_url_hd",
+                "profile_pic_url",
+                "hd_profile_pic_url",
+                "profilepicurl",
+            }:
+                url = _is_http_url(value)
+                if url:
+                    return url
+            if key_l in {"hd_profile_pic_url_info", "profile_pic_url_info"}:
+                url = _is_http_url(safe_dict(value).get("url"))
+                if url:
+                    return url
+            if "profile_pic" in key_l or key_l.endswith("_pic_url"):
+                url = _is_http_url(value)
+                if url:
+                    return url
+
+        for value in obj.values():
+            found = _find_avatar_url_deep(
+                value, depth=depth + 1, username=username
+            )
+            if found:
+                return found
+
+    elif isinstance(obj, list):
+        for item in obj:
+            found = _find_avatar_url_deep(
+                item, depth=depth + 1, username=username
+            )
+            if found:
+                return found
 
     return None
+
+
+def extract_avatar_from_profile_payload(
+    profile_data: dict[str, Any],
+) -> str | None:
+    """Ищет аватар в полном ответе profile API / GraphQL."""
+    user = safe_dict(dig(profile_data, "data", "user"))
+    url = extract_avatar_url(user)
+    if url:
+        return url
+    return _find_avatar_url_deep(profile_data)
 
 
 def normalize_user_node(user: dict[str, Any]) -> dict[str, Any]:
