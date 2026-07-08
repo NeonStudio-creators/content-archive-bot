@@ -29,7 +29,7 @@ def create_bot(settings: Settings) -> tuple[Bot, Dispatcher, ArchiveOrchestrator
     orchestrator = ArchiveOrchestrator(settings)
     presenter = TelegramPresenter(settings)
 
-    dp.include_router(commands.router)
+    dp.include_router(commands.setup_commands(orchestrator))
     dp.include_router(links.setup_link_handler(orchestrator, presenter))
 
     # Сохраняем orchestrator в workflow_data для graceful shutdown

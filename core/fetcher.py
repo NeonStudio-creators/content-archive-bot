@@ -25,8 +25,15 @@ from core.profile_adapter import (
     find_user_id_in_search,
     from_embedded_profile_json,
     from_gql_profile,
+    from_html_meta,
     from_usernameinfo,
     from_web_profile_info,
+)
+from core.session_bootstrap import (
+    is_profile_not_found_html,
+    merge_cookies,
+    parse_set_cookies,
+    parse_tokens_from_html,
 )
 from core.models import EntityType
 from utils.concurrency import first_success
@@ -213,6 +220,7 @@ class GraphQLFetcher:
     def __post_init__(self) -> None:
         self._session: aiohttp.ClientSession | None = None
         self._lsd_token: str | None = None
+        self._session_ready = False
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -223,6 +231,41 @@ class GraphQLFetcher:
     async def close(self) -> None:
         if self._session and not self._session.closed:
             await self._session.close()
+
+    async def ensure_session(self) -> None:
+        """Прогрев: получает csrftoken / mid / ig_did с главной страницы."""
+        if self._session_ready:
+            return
+
+        referer = f"{self.settings.platform_base_url}/"
+        try:
+            await self.rate_limiter.wait()
+            session = await self._get_session()
+            headers = self.auth.build_headers(referer=referer, api_type="web")
+            cookies = self.auth.build_cookies()
+
+            async with session.get(
+                referer,
+                headers=headers,
+                cookies=cookies,
+                allow_redirects=True,
+            ) as resp:
+                body = await resp.text()
+                set_cookies = parse_set_cookies(resp.headers)
+                html_tokens = parse_tokens_from_html(body)
+                merged = merge_cookies(set_cookies, html_tokens)
+                self.auth.update_runtime_cookies(merged)
+                if merged.get("lsd"):
+                    self._lsd_token = merged["lsd"]
+                logger.info(
+                    "session bootstrap: csrftoken=%s, cookies=%s",
+                    "OK" if self.auth.get_csrf_token() else "MISSING",
+                    list(merged.keys()),
+                )
+        except Exception as exc:
+            logger.warning("session bootstrap failed: %s", exc)
+        finally:
+            self._session_ready = True
 
     async def _request(
         self,
@@ -409,10 +452,18 @@ class GraphQLFetcher:
             )
             if not isinstance(payload, dict):
                 return None
+            if payload.get("status") == "fail":
+                msg = str(payload.get("message", ""))
+                logger.warning("profile web API: %s", msg)
+                if "not found" in msg.lower() or "invalid user" in msg.lower():
+                    raise ValueError(f"Профиль @{username} не найден в Instagram.")
+                return None
             result = from_web_profile_info(payload)
             if result:
                 logger.info("profile: web API OK для %s", username)
                 return result
+        except ValueError:
+            raise
         except Exception as exc:
             logger.warning("profile web API failed для %s: %s", username, exc)
         return None
@@ -527,6 +578,9 @@ class GraphQLFetcher:
             if not isinstance(html, str):
                 return None
 
+            if is_profile_not_found_html(html, username):
+                raise ValueError(f"Профиль @{username} не найден в Instagram.")
+
             for match in re.finditer(
                 r'<script[^>]*type="application/json"[^>]*>(\{.+?\})</script>',
                 html,
@@ -540,37 +594,73 @@ class GraphQLFetcher:
                         return result
                 except json.JSONDecodeError:
                     continue
+
+            result = from_html_meta(html, username)
+            if result:
+                logger.info("profile: HTML meta OK для %s", username)
+                return result
+        except ValueError:
+            raise
         except Exception as exc:
             logger.warning("profile HTML failed для %s: %s", username, exc)
         return None
 
+    async def _profile_cascade(
+        self, username: str, referer: str
+    ) -> dict[str, Any] | None:
+        """Последовательный каскад — меньше 429 и понятнее логи."""
+        strategies = (
+            self._fetch_profile_via_web_api,
+            self._fetch_profile_via_mobile,
+            self._fetch_profile_via_usernameinfo,
+            self._fetch_profile_via_gql_polaris,
+            self._fetch_profile_via_gql_legacy,
+            self._fetch_profile_via_html,
+        )
+        for strategy in strategies:
+            try:
+                result = await strategy(username, referer)
+                if result:
+                    return result
+            except ValueError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "profile %s: %s → %s",
+                    username,
+                    strategy.__name__,
+                    exc,
+                )
+        return None
+
     async def fetch_web_profile(self, username: str) -> dict[str, Any]:
         """
-        Профиль — каскад стратегий:
-        1. www.instagram.com/api/v1/users/web_profile_info/
-        2. i.instagram.com mobile web_profile_info
-        3. mobile usernameinfo
-        4. GraphQL Polaris (search + profile page)
-        5. legacy GraphQL POST/GET
-        6. HTML embedded JSON
+        Профиль — каскад стратегий с прогревом сессии.
         """
+        await self.ensure_session()
         referer = self._profile_referer(username)
-        logger.info("profile %s → referer=%s", username, referer)
+        logger.info(
+            "profile %s → csrf=%s",
+            username,
+            "OK" if self.auth.get_csrf_token() else "MISSING",
+        )
 
-        result = await first_success([
-            lambda: self._fetch_profile_via_web_api(username, referer),
-            lambda: self._fetch_profile_via_mobile(username, referer),
-            lambda: self._fetch_profile_via_usernameinfo(username, referer),
-            lambda: self._fetch_profile_via_gql_polaris(username, referer),
-            lambda: self._fetch_profile_via_gql_legacy(username, referer),
-            lambda: self._fetch_profile_via_html(username, referer),
-        ])
+        result = await self._profile_cascade(username, referer)
         if result:
             return result
 
+        if not self.auth.get_csrf_token():
+            raise ValueError(
+                f"Профиль @{username} недоступен: не удалось получить csrftoken. "
+                "Добавьте CSRF_TOKEN в Railway (cookie csrftoken из браузера) "
+                "и обновите SESSION_TOKEN."
+            )
+
         raise ValueError(
             f"Профиль @{username} недоступен. "
-            "Проверьте SESSION_TOKEN и CSRF_TOKEN — возможно, сессия истекла."
+            "Обновите SESSION_TOKEN и CSRF_TOKEN в Railway — "
+            "возьмите свежие sessionid и csrftoken из cookies instagram.com "
+            "(F12 → Application → Cookies)."
         )
 
     async def fetch_user_posts(self, user_id: str) -> list[dict[str, Any]]:

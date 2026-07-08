@@ -11,6 +11,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from utils.tokens import normalize_csrf_token, normalize_session_token
+
 # .env — для локального запуска; на деплое используются Variables платформы
 _PROJECT_ROOT = Path(__file__).resolve().parent
 load_dotenv(_PROJECT_ROOT / ".env", override=False)
@@ -64,8 +66,10 @@ class Settings:
 
         return cls(
             telegram_bot_token=token,
-            session_token=session,
-            csrf_token=os.getenv("CSRF_TOKEN", "").strip(),
+            session_token=normalize_session_token(session),
+            csrf_token=normalize_csrf_token(
+                os.getenv("CSRF_TOKEN", "").strip()
+            ),
             user_agent=os.getenv(
                 "USER_AGENT",
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

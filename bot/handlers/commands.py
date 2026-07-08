@@ -8,6 +8,8 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from core.orchestrator import ArchiveOrchestrator
+
 router = Router(name="commands")
 
 START_TEXT = """
@@ -59,8 +61,32 @@ HELP_TEXT = """
 ───────────────
 <code>TELEGRAM_BOT_TOKEN</code>
 <code>SESSION_TOKEN</code>
-<code>CSRF_TOKEN</code> — опционально
+<code>CSRF_TOKEN</code> — обязателен (cookie csrftoken)
 """
+
+
+def setup_commands(orchestrator: ArchiveOrchestrator) -> Router:
+    @router.message(Command("session"))
+    async def cmd_session(message: Message) -> None:
+        await orchestrator.fetcher.ensure_session()
+        csrf = orchestrator.auth.get_csrf_token()
+        lines = [
+            "<b>ContentExplorer</b> · Проверка сессии",
+            "",
+            f"SESSION_TOKEN · {'OK' if orchestrator.auth.session_id else 'нет'}",
+            f"CSRF_TOKEN · {'OK' if csrf else 'нет — добавьте в Railway'}",
+        ]
+        try:
+            data = await orchestrator.fetcher.fetch_web_profile("instagram")
+            user = data.get("data", {}).get("user", {})
+            lines.append(
+                f"Тест API · OK (@{user.get('username', 'instagram')})"
+            )
+        except Exception as exc:
+            lines.append(f"Тест API · ошибка: {exc}")
+        await message.answer("\n".join(lines), parse_mode="HTML")
+
+    return router
 
 
 @router.message(Command("start"))

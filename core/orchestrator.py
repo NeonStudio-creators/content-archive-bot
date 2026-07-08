@@ -52,6 +52,8 @@ class ArchiveOrchestrator:
         if not self.auth.is_configured():
             raise RuntimeError("SESSION_TOKEN не настроен")
 
+        await self.fetcher.ensure_session()
+
         logger.info(
             "Обработка %s → тип %s, id=%s",
             url,

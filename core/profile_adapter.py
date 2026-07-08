@@ -108,3 +108,72 @@ def from_embedded_profile_json(
     if not user:
         return None
     return wrap_profile(user)
+
+
+def from_html_meta(html: str, username: str) -> dict[str, Any] | None:
+    """Минимальный профиль из meta/og тегов (fallback без API)."""
+    import re
+
+    title_m = re.search(
+        r'<meta\s+property="og:title"\s+content="([^"]*)"',
+        html,
+        re.I,
+    )
+    desc_m = re.search(
+        r'<meta\s+property="og:description"\s+content="([^"]*)"',
+        html,
+        re.I,
+    )
+    image_m = re.search(
+        r'<meta\s+property="og:image"\s+content="([^"]*)"',
+        html,
+        re.I,
+    )
+    if not title_m and not desc_m:
+        return None
+
+    title = title_m.group(1) if title_m else ""
+    display_name = title.split("(")[0].strip() if title else username
+    if display_name.startswith("@"):
+        display_name = display_name[1:]
+
+    bio = desc_m.group(1) if desc_m else ""
+    followers = following = posts = None
+    stats_m = re.search(
+        r"([\d,.]+[KMB]?)\s+Followers,\s*([\d,.]+[KMB]?)\s+Following,\s*([\d,.]+[KMB]?)\s+Posts",
+        bio,
+        re.I,
+    )
+    if stats_m:
+        followers, following, posts = stats_m.groups()
+
+    def _parse_count(val: str | None) -> int | None:
+        if not val:
+            return None
+        val = val.replace(",", "").strip().upper()
+        mult = 1
+        if val.endswith("K"):
+            mult = 1_000
+            val = val[:-1]
+        elif val.endswith("M"):
+            mult = 1_000_000
+            val = val[:-1]
+        elif val.endswith("B"):
+            mult = 1_000_000_000
+            val = val[:-1]
+        try:
+            return int(float(val) * mult)
+        except ValueError:
+            return None
+
+    user: dict[str, Any] = {
+        "username": username,
+        "full_name": display_name or username,
+        "biography": bio,
+        "profile_pic_url_hd": image_m.group(1) if image_m else None,
+        "edge_followed_by": {"count": _parse_count(followers)},
+        "edge_follow": {"count": _parse_count(following)},
+        "edge_owner_to_timeline_media": {"count": _parse_count(posts)},
+        "source": "html_meta",
+    }
+    return wrap_profile(user)
