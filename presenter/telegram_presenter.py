@@ -23,6 +23,7 @@ from core.profile_adapter import (
     extract_avatar_url,
 )
 from utils import telegram_html as th
+from utils.image_utils import to_square_jpeg
 
 if TYPE_CHECKING:
     from aiogram import Bot
@@ -43,7 +44,7 @@ class TelegramPresenter:
     """Минималистичное оформление отчётов для Telegram."""
 
     BRAND = "ContentExplorer"
-    VERSION = "1.3.4"
+    VERSION = "1.3.5"
 
     PUB_MODES = {
         "prof": "Профиль автора",
@@ -1370,13 +1371,17 @@ class TelegramPresenter:
 
         referer = self._profile_url(bundle.metadata.username or "")
         photo_bytes: bytes | None = None
+        square_side: int | None = None
         if self.fetcher:
             try:
-                photo_bytes = await self.fetcher.download_image_bytes(
+                raw = await self.fetcher.download_image_bytes(
                     preview.url,
                     referer=referer,
                     label="avatar_download",
                 )
+                photo_bytes, square_side = to_square_jpeg(raw)
+                preview.width = square_side
+                preview.height = square_side
             except Exception as exc:
                 logger.warning("Avatar download failed: %s", exc)
 
@@ -1385,7 +1390,7 @@ class TelegramPresenter:
         for cap in (caption, ""):
             if photo_bytes:
                 photo: BufferedInputFile | str = BufferedInputFile(
-                    photo_bytes, filename="avatar.jpg"
+                    photo_bytes, filename="avatar_1x1.jpg"
                 )
             else:
                 photo = preview.url

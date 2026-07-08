@@ -21,6 +21,30 @@ def _is_http_url(value: Any) -> str | None:
     return None
 
 
+def _best_square_version_url(versions: list) -> str | None:
+    """Выбирает максимальную квадратную 1:1 версию аватарки."""
+    square: list[tuple[int, dict]] = []
+    other: list[tuple[int, dict]] = []
+
+    for raw in versions:
+        v = safe_dict(raw)
+        w = int(v.get("width") or 0)
+        h = int(v.get("height") or 0)
+        if not _is_http_url(v.get("url")):
+            continue
+        area = w * h
+        if w and h and w == h:
+            square.append((area, v))
+        elif area:
+            other.append((area, v))
+
+    pool = square or other
+    if not pool:
+        return None
+    best = max(pool, key=lambda item: item[0])[1]
+    return _is_http_url(best.get("url"))
+
+
 def extract_avatar_url(user: dict[str, Any]) -> str | None:
     """Достаёт URL аватарки из любого формата ответа API."""
     if not user:
@@ -47,12 +71,7 @@ def extract_avatar_url(user: dict[str, Any]) -> str | None:
         versions = user.get(key)
         if not isinstance(versions, list) or not versions:
             continue
-        best = max(
-            versions,
-            key=lambda v: (safe_dict(v).get("width") or 0)
-            * (safe_dict(v).get("height") or 0),
-        )
-        url = _is_http_url(safe_dict(best).get("url"))
+        url = _best_square_version_url(versions)
         if url:
             return url
 
