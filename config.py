@@ -39,16 +39,18 @@ class Settings:
     graphql_endpoint: str = "https://www.instagram.com/api/graphql"
 
     # «Тихий» режим — задержки, потоки и лимиты
-    request_delay_sec: float = 0.8
-    max_concurrent_requests: int = 6
-    max_retries: int = 3
-    retry_backoff_sec: float = 2.0
+    request_delay_sec: float = 0.4
+    max_concurrent_requests: int = 8
+    max_retries: int = 2
+    retry_backoff_sec: float = 1.5
     pagination_page_size: int = 24
     max_pagination_pages: int = 100
     comments_page_size: int = 50
     max_comment_pages: int = 20
-    profile_enrich_top_posts: int = 5
-    profile_max_highlights_fetch: int = 5
+    profile_max_pages: int = 2
+    profile_max_tagged_pages: int = 1
+    profile_enrich_top_posts: int = 2
+    profile_max_highlights_fetch: int = 0
 
     # Telegram-лимиты
     max_media_per_message: int = 10
@@ -87,11 +89,15 @@ class Settings:
             max_pagination_pages=int(os.getenv("MAX_PAGINATION_PAGES", "100")),
             comments_page_size=int(os.getenv("COMMENTS_PAGE_SIZE", "50")),
             max_comment_pages=int(os.getenv("MAX_COMMENT_PAGES", "20")),
+            profile_max_pages=int(os.getenv("PROFILE_MAX_PAGES", "2")),
+            profile_max_tagged_pages=int(
+                os.getenv("PROFILE_MAX_TAGGED_PAGES", "1")
+            ),
             profile_enrich_top_posts=int(
-                os.getenv("PROFILE_ENRICH_TOP_POSTS", "5")
+                os.getenv("PROFILE_ENRICH_TOP_POSTS", "2")
             ),
             profile_max_highlights_fetch=int(
-                os.getenv("PROFILE_MAX_HIGHLIGHTS_FETCH", "5")
+                os.getenv("PROFILE_MAX_HIGHLIGHTS_FETCH", "0")
             ),
         )
 

@@ -397,6 +397,7 @@ class GraphQLFetcher:
         edges_path: list[str],
         referer: str | None = None,
         label: str = "paginated",
+        max_pages: int | None = None,
     ) -> list[dict[str, Any]]:
         """
         Универсальная пагинация: обходит все страницы до has_next_page=False
@@ -406,7 +407,8 @@ class GraphQLFetcher:
         cursor: str | None = None
         base_vars = dict(variables)
 
-        for page in range(self.settings.max_pagination_pages):
+        page_limit = max_pages or self.settings.max_pagination_pages
+        for page in range(page_limit):
             vars_page = {**base_vars}
             if cursor:
                 vars_page["after"] = cursor
@@ -628,9 +630,6 @@ class GraphQLFetcher:
     ) -> dict[str, Any] | None:
         """Последовательный каскад — меньше 429 и понятнее логи."""
         strategies = (
-            self._fetch_profile_via_web_api,
-            self._fetch_profile_via_mobile,
-            self._fetch_profile_via_usernameinfo,
             self._fetch_profile_via_gql_polaris,
             self._fetch_profile_via_gql_legacy,
             self._fetch_profile_via_html,
@@ -661,6 +660,14 @@ class GraphQLFetcher:
             "OK" if self.auth.get_csrf_token() else "MISSING",
         )
 
+        fast = await first_success([
+            lambda: self._fetch_profile_via_web_api(username, referer),
+            lambda: self._fetch_profile_via_mobile(username, referer),
+            lambda: self._fetch_profile_via_usernameinfo(username, referer),
+        ])
+        if fast:
+            return fast
+
         result = await self._profile_cascade(username, referer)
         if result:
             return result
@@ -679,13 +686,14 @@ class GraphQLFetcher:
         )
 
     async def _fetch_user_posts_mobile(
-        self, user_id: str
+        self, user_id: str, *, max_pages: int | None = None
     ) -> list[dict[str, Any]]:
         """Посты через mobile feed/user (без GraphQL)."""
         edges: list[dict[str, Any]] = []
         max_id: str | None = None
+        page_limit = max_pages or self.settings.max_pagination_pages
 
-        for page in range(self.settings.max_pagination_pages):
+        for page in range(page_limit):
             params: dict[str, str] = {
                 "count": str(self.settings.pagination_page_size),
             }
@@ -707,7 +715,9 @@ class GraphQLFetcher:
 
         return edges
 
-    async def fetch_user_posts(self, user_id: str) -> list[dict[str, Any]]:
+    async def fetch_user_posts(
+        self, user_id: str, *, max_pages: int | None = None
+    ) -> list[dict[str, Any]]:
         """Публикации профиля — GraphQL POST, fallback mobile feed."""
         try:
             edges = await self.fetch_paginated(
@@ -718,6 +728,7 @@ class GraphQLFetcher:
                 },
                 edges_path=["user", "edge_owner_to_timeline_media"],
                 label="user_posts",
+                max_pages=max_pages,
             )
             if edges:
                 return edges
@@ -725,7 +736,9 @@ class GraphQLFetcher:
             logger.warning("user_posts GraphQL: %s", exc)
 
         try:
-            edges = await self._fetch_user_posts_mobile(user_id)
+            edges = await self._fetch_user_posts_mobile(
+                user_id, max_pages=max_pages
+            )
             if edges:
                 logger.info("user_posts: mobile feed OK, %d items", len(edges))
             return edges
@@ -733,7 +746,9 @@ class GraphQLFetcher:
             logger.warning("user_posts mobile: %s", exc)
             return []
 
-    async def fetch_user_reels(self, user_id: str) -> list[dict[str, Any]]:
+    async def fetch_user_reels(
+        self, user_id: str, *, max_pages: int | None = None
+    ) -> list[dict[str, Any]]:
         """Reels профиля."""
         try:
             return await self.fetch_paginated(
@@ -741,19 +756,25 @@ class GraphQLFetcher:
                 {"id": user_id, "first": self.settings.pagination_page_size},
                 edges_path=["user", "edge_felix_video_timeline"],
                 label="user_reels",
+                max_pages=max_pages,
             )
         except Exception as exc:
             logger.warning("user_reels недоступны: %s", exc)
             return []
 
-    async def fetch_user_tagged(self, user_id: str) -> list[dict[str, Any]]:
+    async def fetch_user_tagged(
+        self, user_id: str, *, max_pages: int | None = None
+    ) -> list[dict[str, Any]]:
         """Публикации, где отмечен пользователь."""
+        if max_pages == 0:
+            return []
         try:
             return await self.fetch_paginated(
                 DOC_IDS["user_tagged"],
                 {"id": user_id, "first": self.settings.pagination_page_size},
                 edges_path=["user", "edge_user_to_photos_of_you"],
                 label="user_tagged",
+                max_pages=max_pages,
             )
         except Exception as exc:
             logger.warning("user_tagged GraphQL: %s", exc)

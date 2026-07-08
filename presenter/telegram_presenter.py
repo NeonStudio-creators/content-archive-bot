@@ -279,35 +279,54 @@ class TelegramPresenter:
 
         return [q for q in quotes if q]
 
+    @staticmethod
+    def _normalize_media_url(url: str | None) -> str | None:
+        if not url:
+            return None
+        u = url.strip()
+        if u.startswith("//"):
+            return f"https:{u}"
+        if u.startswith("http"):
+            return u
+        return None
+
+    def _profile_avatar_asset(self, bundle: ArchiveBundle) -> MediaAsset | None:
+        url = self._normalize_media_url(bundle.metadata.avatar_url)
+        if not url:
+            for asset in bundle.media:
+                if asset.extra.get("source") == "avatar":
+                    url = self._normalize_media_url(asset.url)
+                    if url:
+                        break
+        if not url:
+            return None
+        return MediaAsset(
+            id="avatar",
+            media_type="image",
+            url=url,
+            extra={"source": "avatar"},
+        )
+
     def _pick_preview_media(self, bundle: ArchiveBundle) -> MediaAsset | None:
+        if bundle.resolved_type == EntityType.PROFILE:
+            avatar = self._profile_avatar_asset(bundle)
+            if avatar:
+                return avatar
+
         valid = [
             m for m in bundle.media
-            if m.url and m.url.startswith("http")
+            if self._normalize_media_url(m.url)
         ]
         if not valid:
-            if bundle.metadata.avatar_url:
-                return MediaAsset(
-                    id="avatar",
-                    media_type="image",
-                    url=bundle.metadata.avatar_url,
-                )
             return None
-
-        if bundle.resolved_type == EntityType.PROFILE:
-            for asset in valid:
-                if asset.extra.get("source") == "avatar":
-                    return asset
-            if bundle.metadata.avatar_url:
-                return MediaAsset(
-                    id="avatar",
-                    media_type="image",
-                    url=bundle.metadata.avatar_url,
-                )
 
         for asset in valid:
             if asset.media_type == "video":
+                asset.url = self._normalize_media_url(asset.url) or asset.url
                 return asset
-        return valid[0]
+        first = valid[0]
+        first.url = self._normalize_media_url(first.url) or first.url
+        return first
 
     def _post_url(self, shortcode: str) -> str:
         return f"{self._ig_base}/p/{shortcode}/"
@@ -843,17 +862,21 @@ class TelegramPresenter:
 
         sent = False
         if preview:
+            use_photo = (
+                bundle.resolved_type == EntityType.PROFILE
+                or preview.media_type != "video"
+            )
             try:
-                if preview.media_type == "video":
-                    await message.answer_video(
-                        video=preview.url,
+                if use_photo:
+                    await message.answer_photo(
+                        photo=preview.url,
                         caption=caption,
                         parse_mode="HTML",
                         reply_markup=keyboard,
                     )
                 else:
-                    await message.answer_photo(
-                        photo=preview.url,
+                    await message.answer_video(
+                        video=preview.url,
                         caption=caption,
                         parse_mode="HTML",
                         reply_markup=keyboard,
@@ -862,12 +885,12 @@ class TelegramPresenter:
             except TelegramBadRequest as exc:
                 logger.warning("Media caption error: %s", exc)
                 try:
-                    if preview.media_type == "video":
-                        await message.answer_video(
+                    if use_photo:
+                        await message.answer_photo(
                             preview.url, reply_markup=keyboard
                         )
                     else:
-                        await message.answer_photo(
+                        await message.answer_video(
                             preview.url, reply_markup=keyboard
                         )
                     await self._send_html(message, report, keyboard)

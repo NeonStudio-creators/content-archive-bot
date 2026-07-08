@@ -182,10 +182,15 @@ class ArchiveOrchestrator:
         extra_activity: list[ActivityRecord] = []
 
         if user_id and not user.get("is_private"):
+            pages = self.settings.profile_max_pages
+            tagged_pages = self.settings.profile_max_tagged_pages
+
             gathered = await asyncio.gather(
-                self.fetcher.fetch_user_posts(user_id),
-                self.fetcher.fetch_user_reels(user_id),
-                self.fetcher.fetch_user_tagged(user_id),
+                self.fetcher.fetch_user_posts(user_id, max_pages=pages),
+                self.fetcher.fetch_user_reels(user_id, max_pages=pages),
+                self.fetcher.fetch_user_tagged(
+                    user_id, max_pages=tagged_pages
+                ),
                 self.fetcher.fetch_user_highlights(user_id),
                 return_exceptions=True,
             )
@@ -199,12 +204,31 @@ class ArchiveOrchestrator:
                     results.append(item)
             post_edges, reel_edges, tagged_edges, highlight_edges = results
 
-            enrich_task = self._enrich_top_posts_comments(post_edges)
-            highlights_task = self._fetch_highlights_media(highlight_edges)
-            extra_activity, highlight_media = await asyncio.gather(
-                enrich_task,
-                highlights_task,
-            )
+            optional_tasks: list[tuple[str, object]] = []
+            if self.settings.profile_enrich_top_posts > 0:
+                optional_tasks.append(
+                    ("comments", self._enrich_top_posts_comments(post_edges))
+                )
+            if self.settings.profile_max_highlights_fetch > 0:
+                optional_tasks.append(
+                    (
+                        "highlights",
+                        self._fetch_highlights_media(highlight_edges),
+                    )
+                )
+
+            if optional_tasks:
+                done = await asyncio.gather(
+                    *(coro for _, coro in optional_tasks),
+                    return_exceptions=True,
+                )
+                for (name, _), result in zip(optional_tasks, done):
+                    if isinstance(result, BaseException):
+                        logger.warning("Доп. сбор %s: %s", name, result)
+                    elif name == "comments":
+                        extra_activity = result
+                    elif name == "highlights":
+                        highlight_media = result
 
         return self.parser.parse_profile(
             resolved,

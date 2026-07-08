@@ -28,7 +28,7 @@ START_TEXT = """
 <b>Поддерживаемые ссылки</b>
 ───────────────
 Профиль · <code>instagram.com/username</code>
-  посты, reels, отметки, сторис, актуальное, комментарии
+  аватар сверху · посты, reels, отметки · быстрый сбор
 Пост · <code>instagram.com/p/…</code>
 Reels · <code>instagram.com/reel/…</code>
 Сторис · <code>instagram.com/stories/user/id</code>
