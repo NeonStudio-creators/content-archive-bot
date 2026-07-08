@@ -21,6 +21,13 @@ from core.media_adapter import (
     from_graphql_polaris,
     from_rest_media_info,
 )
+from core.profile_adapter import (
+    find_user_id_in_search,
+    from_embedded_profile_json,
+    from_gql_profile,
+    from_usernameinfo,
+    from_web_profile_info,
+)
 from core.models import EntityType
 from utils.concurrency import first_success
 from utils.dict_utils import safe_dict
@@ -32,7 +39,9 @@ logger = logging.getLogger(__name__)
 
 # ── GraphQL doc_id (внутренние идентификаторы запросов платформы) ──────────
 DOC_IDS = {
-    "user_profile": "25025320fc2a3a4c0da3e2ee7b81bce8",
+    "user_profile": "26762473490008061",
+    "user_profile_by_username": "26347858941511777",
+    "user_profile_legacy": "25025320fc2a3a4c0da3e2ee7b81bce8",
     "user_posts": "0033d8c4fa3a17f23b88bd3ac1c55e5b",
     # Актуальный doc_id (media_id, не shortcode) — Polaris 2025+
     "media_info": "27130156389949648",
@@ -225,11 +234,14 @@ class GraphQLFetcher:
         params: dict[str, Any] | None = None,
         data: dict[str, Any] | None = None,
         api_type: str = "web",
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any] | str:
         async def _do_request() -> dict[str, Any] | str:
             await self.rate_limiter.wait()
             session = await self._get_session()
             headers = self.auth.build_headers(referer=referer, api_type=api_type)
+            if extra_headers:
+                headers.update(extra_headers)
             cookies = self.auth.build_cookies()
 
             async with session.request(
@@ -266,6 +278,7 @@ class GraphQLFetcher:
         referer: str | None = None,
         label: str = "graphql",
         method: str = "GET",
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """GraphQL-запрос (GET или POST) с ретраями."""
 
@@ -285,6 +298,7 @@ class GraphQLFetcher:
                 referer=referer,
                 label=label,
                 data=form,
+                extra_headers=extra_headers,
             )
         else:
             result = await self._request(
@@ -293,6 +307,7 @@ class GraphQLFetcher:
                 referer=referer,
                 label=label,
                 params={"doc_id": doc_id, "variables": variables_json},
+                extra_headers=extra_headers,
             )
 
         if isinstance(result, dict):
@@ -367,13 +382,195 @@ class GraphQLFetcher:
 
         return all_edges
 
+    def _profile_referer(self, username: str) -> str:
+        return f"{self.settings.platform_base_url}/{username}/"
+
+    @staticmethod
+    def _polaris_profile_variables(user_id: str) -> dict[str, Any]:
+        return {
+            "enable_integrity_filters": True,
+            "id": str(user_id),
+            "render_surface": "PROFILE",
+            "__relay_internal__pv__PolarisCannesGuardianExperienceEnabledrelayprovider": True,
+            "__relay_internal__pv__PolarisCASB976ProfileEnabledrelayprovider": False,
+            "__relay_internal__pv__PolarisRepostsConsumptionEnabledrelayprovider": False,
+        }
+
+    async def _fetch_profile_via_web_api(
+        self, username: str, referer: str
+    ) -> dict[str, Any] | None:
+        try:
+            payload = await self._request(
+                "GET",
+                f"{self.settings.platform_base_url}/api/v1/users/web_profile_info/",
+                referer=referer,
+                label="profile_web_api",
+                params={"username": username},
+            )
+            if not isinstance(payload, dict):
+                return None
+            result = from_web_profile_info(payload)
+            if result:
+                logger.info("profile: web API OK для %s", username)
+                return result
+        except Exception as exc:
+            logger.warning("profile web API failed для %s: %s", username, exc)
+        return None
+
+    async def _fetch_profile_via_mobile(
+        self, username: str, referer: str
+    ) -> dict[str, Any] | None:
+        try:
+            payload = await self.mobile_api_get(
+                "/users/web_profile_info/",
+                referer=referer,
+                label="profile_mobile_web",
+                params={"username": username},
+            )
+            result = from_web_profile_info(payload)
+            if result:
+                logger.info("profile: mobile web_profile_info OK для %s", username)
+                return result
+        except Exception as exc:
+            logger.warning("profile mobile web_profile_info failed для %s: %s", username, exc)
+        return None
+
+    async def _fetch_profile_via_usernameinfo(
+        self, username: str, referer: str
+    ) -> dict[str, Any] | None:
+        try:
+            payload = await self.mobile_api_get(
+                f"/users/{username}/usernameinfo/",
+                referer=referer,
+                label="profile_usernameinfo",
+            )
+            result = from_usernameinfo(payload)
+            if result:
+                logger.info("profile: usernameinfo OK для %s", username)
+                return result
+        except Exception as exc:
+            logger.warning("profile usernameinfo failed для %s: %s", username, exc)
+        return None
+
+    async def _fetch_profile_via_gql_polaris(
+        self, username: str, referer: str
+    ) -> dict[str, Any] | None:
+        try:
+            search = await self.graphql(
+                DOC_IDS["user_profile_by_username"],
+                {"hasQuery": True, "query": username},
+                referer=referer,
+                label="profile_search_gql",
+                method="POST",
+            )
+            user_id = find_user_id_in_search(search, username)
+            if not user_id:
+                return None
+
+            payload = await self.graphql(
+                DOC_IDS["user_profile"],
+                self._polaris_profile_variables(user_id),
+                referer=referer,
+                label="profile_polaris_gql",
+                method="POST",
+                extra_headers={
+                    "X-FB-Friendly-Name": "PolarisProfilePageContentQuery",
+                },
+            )
+            result = from_gql_profile(payload)
+            if result:
+                logger.info("profile: Polaris GraphQL OK для %s", username)
+                return result
+        except Exception as exc:
+            logger.warning("profile Polaris GraphQL failed для %s: %s", username, exc)
+        return None
+
+    async def _fetch_profile_via_gql_legacy(
+        self, username: str, referer: str
+    ) -> dict[str, Any] | None:
+        for method in ("POST", "GET"):
+            try:
+                payload = await self.graphql(
+                    DOC_IDS["user_profile_legacy"],
+                    {"username": username, "include_reel": True},
+                    referer=referer,
+                    label=f"profile_legacy_{method.lower()}",
+                    method=method,
+                )
+                result = from_gql_profile(payload)
+                if result:
+                    logger.info(
+                        "profile: legacy GraphQL %s OK для %s",
+                        method,
+                        username,
+                    )
+                    return result
+            except Exception as exc:
+                logger.warning(
+                    "profile legacy %s failed для %s: %s",
+                    method,
+                    username,
+                    exc,
+                )
+        return None
+
+    async def _fetch_profile_via_html(
+        self, username: str, referer: str
+    ) -> dict[str, Any] | None:
+        try:
+            html = await self._request(
+                "GET",
+                referer,
+                referer=referer,
+                label="profile_html",
+            )
+            if not isinstance(html, str):
+                return None
+
+            for match in re.finditer(
+                r'<script[^>]*type="application/json"[^>]*>(\{.+?\})</script>',
+                html,
+                re.DOTALL,
+            ):
+                try:
+                    blob = json.loads(match.group(1))
+                    result = from_embedded_profile_json(blob, username)
+                    if result:
+                        logger.info("profile: HTML JSON OK для %s", username)
+                        return result
+                except json.JSONDecodeError:
+                    continue
+        except Exception as exc:
+            logger.warning("profile HTML failed для %s: %s", username, exc)
+        return None
+
     async def fetch_web_profile(self, username: str) -> dict[str, Any]:
-        """Профиль через GraphQL doc_id."""
-        return await self.graphql(
-            DOC_IDS["user_profile"],
-            {"username": username, "include_reel": True},
-            referer=f"{self.settings.platform_base_url}/{username}/",
-            label="user_profile",
+        """
+        Профиль — каскад стратегий:
+        1. www.instagram.com/api/v1/users/web_profile_info/
+        2. i.instagram.com mobile web_profile_info
+        3. mobile usernameinfo
+        4. GraphQL Polaris (search + profile page)
+        5. legacy GraphQL POST/GET
+        6. HTML embedded JSON
+        """
+        referer = self._profile_referer(username)
+        logger.info("profile %s → referer=%s", username, referer)
+
+        result = await first_success([
+            lambda: self._fetch_profile_via_web_api(username, referer),
+            lambda: self._fetch_profile_via_mobile(username, referer),
+            lambda: self._fetch_profile_via_usernameinfo(username, referer),
+            lambda: self._fetch_profile_via_gql_polaris(username, referer),
+            lambda: self._fetch_profile_via_gql_legacy(username, referer),
+            lambda: self._fetch_profile_via_html(username, referer),
+        ])
+        if result:
+            return result
+
+        raise ValueError(
+            f"Профиль @{username} недоступен. "
+            "Проверьте SESSION_TOKEN и CSRF_TOKEN — возможно, сессия истекла."
         )
 
     async def fetch_user_posts(self, user_id: str) -> list[dict[str, Any]]:

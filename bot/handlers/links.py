@@ -58,8 +58,14 @@ def setup_link_handler(
                 )
             except Exception as exc:
                 logger.exception("Ошибка обработки %s", url)
+                err = str(exc)
+                if "400" in err and "Bad Request" in err:
+                    err = (
+                        "Instagram отклонил запрос (400). "
+                        "Обновите SESSION_TOKEN и CSRF_TOKEN в Railway."
+                    )
                 await status_msg.edit_text(
-                    f"❌ Ошибка при сборе архива: {exc}",
+                    f"❌ {err}",
                     parse_mode="HTML",
                 )
 
