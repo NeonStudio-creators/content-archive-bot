@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import html as html_module
 from typing import Any
 
 from utils.dict_utils import dig, safe_dict
@@ -132,12 +133,12 @@ def from_html_meta(html: str, username: str) -> dict[str, Any] | None:
     if not title_m and not desc_m:
         return None
 
-    title = title_m.group(1) if title_m else ""
+    title = html_module.unescape(title_m.group(1)) if title_m else ""
     display_name = title.split("(")[0].strip() if title else username
     if display_name.startswith("@"):
         display_name = display_name[1:]
 
-    bio = desc_m.group(1) if desc_m else ""
+    bio = html_module.unescape(desc_m.group(1)) if desc_m else ""
     followers = following = posts = None
     stats_m = re.search(
         r"([\d,.]+[KMB]?)\s+Followers,\s*([\d,.]+[KMB]?)\s+Following,\s*([\d,.]+[KMB]?)\s+Posts",

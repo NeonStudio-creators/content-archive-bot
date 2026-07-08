@@ -52,10 +52,33 @@ def merge_cookies(*maps: dict[str, str]) -> dict[str, str]:
     return merged
 
 
-def is_profile_not_found_html(html: str, username: str) -> bool:
+def profile_signals_in_html(html: str, username: str) -> bool:
+    """Есть ли признаки реального профиля в HTML (og:title, canonical)."""
     low = html.lower()
+    user = username.lower()
+    markers = (
+        f"@{user}",
+        f"/{user}/",
+        f"&#064;{user}",
+        f"content=\"{user}",
+    )
+    return any(m in low for m in markers) and (
+        "og:title" in low or "profilepage" in low or "polarisprofile" in low
+    )
+
+
+def is_profile_not_found_html(html: str, username: str) -> bool:
+    """
+    Строгая проверка 404 — только если нет признаков профиля.
+    Instagram вшивает httpErrorPage в JS даже на живых страницах.
+    """
+    if profile_signals_in_html(html, username):
+        return False
+
+    low = html.lower()
+    user = username.lower()
     if "show_lox_redesigned_404_page" in low:
         return True
-    if f"/{username.lower()}/" in low and "httperrorpage" in low:
+    if f"/{user}/" in low and "page_type\":\"httpErrorPage\"" in low:
         return True
     return False

@@ -478,15 +478,11 @@ class GraphQLFetcher:
             if payload.get("status") == "fail":
                 msg = str(payload.get("message", ""))
                 logger.warning("profile web API: %s", msg)
-                if "not found" in msg.lower() or "invalid user" in msg.lower():
-                    raise ValueError(f"Профиль @{username} не найден в Instagram.")
                 return None
             result = from_web_profile_info(payload)
             if result:
                 logger.info("profile: web API OK для %s", username)
                 return result
-        except ValueError:
-            raise
         except Exception as exc:
             logger.warning("profile web API failed для %s: %s", username, exc)
         return None
@@ -602,7 +598,8 @@ class GraphQLFetcher:
                 return None
 
             if is_profile_not_found_html(html, username):
-                raise ValueError(f"Профиль @{username} не найден в Instagram.")
+                logger.warning("profile HTML: маркеры 404 для %s", username)
+                return None
 
             for match in re.finditer(
                 r'<script[^>]*type="application/json"[^>]*>(\{.+?\})</script>',
@@ -622,8 +619,6 @@ class GraphQLFetcher:
             if result:
                 logger.info("profile: HTML meta OK для %s", username)
                 return result
-        except ValueError:
-            raise
         except Exception as exc:
             logger.warning("profile HTML failed для %s: %s", username, exc)
         return None
@@ -645,8 +640,6 @@ class GraphQLFetcher:
                 result = await strategy(username, referer)
                 if result:
                     return result
-            except ValueError:
-                raise
             except Exception as exc:
                 logger.warning(
                     "profile %s: %s → %s",
@@ -680,10 +673,9 @@ class GraphQLFetcher:
             )
 
         raise ValueError(
-            f"Профиль @{username} недоступен. "
-            "Обновите SESSION_TOKEN и CSRF_TOKEN в Railway — "
-            "возьмите свежие sessionid и csrftoken из cookies instagram.com "
-            "(F12 → Application → Cookies)."
+            f"Профиль @{username} не найден или недоступен. "
+            "Проверьте ник, обновите SESSION_TOKEN и CSRF_TOKEN (/session), "
+            "или аккаунт может быть приватным."
         )
 
     async def _fetch_user_posts_mobile(
