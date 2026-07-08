@@ -45,7 +45,9 @@ def setup_link_handler(
             status_msg = await presenter.send_processing(message, url)
 
             try:
-                bundle = await orchestrator.process_url(url)
+                bundle = await orchestrator.process_url(
+                    LinkResolver.clean_url(url)
+                )
                 await presenter.send_archive(message.bot, message, bundle)
                 await status_msg.delete()
             except ValueError as exc:

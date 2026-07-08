@@ -122,13 +122,21 @@ class LinkResolver:
             r"https?://(?:www\.)?instagram\.com/[^\s<>\"']+",
             re.I,
         )
-        return pattern.findall(text)
+        return [LinkResolver.clean_url(u) for u in pattern.findall(text)]
+
+    @staticmethod
+    def clean_url(url: str) -> str:
+        """Убирает ?igsh=, #fragment и лишние слэши — для распознавания ссылок."""
+        url = url.strip()
+        if not url.startswith("http"):
+            url = f"https://{url}"
+        parsed = urlparse(url)
+        path = parsed.path.rstrip("/") or "/"
+        return f"{parsed.scheme}://{parsed.netloc}{path}"
 
     @classmethod
     def resolve(cls, url: str) -> ResolvedLink | None:
-        url = url.strip().rstrip("/")
-        if not url.startswith("http"):
-            url = f"https://{url}"
+        url = cls.clean_url(url)
 
         for regex, entity_type, key in URL_PATTERNS:
             match = regex.search(url)
