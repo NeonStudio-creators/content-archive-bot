@@ -142,6 +142,36 @@ class ArchiveBundle:
                     "duration_sec": m.duration_sec,
                     "caption": m.caption,
                     "taken_at": _dt(m.taken_at),
+                    "technical": (
+                        {
+                            k: v
+                            for k, v in m.extra.items()
+                            if k
+                            in (
+                                "resolution",
+                                "width",
+                                "height",
+                                "fps",
+                                "video_codec",
+                                "audio_codec",
+                                "has_audio",
+                                "bandwidth_bps",
+                                "codecs",
+                                "aspect_ratio",
+                                "number_of_qualities",
+                                "is_dash_eligible",
+                                "view_count",
+                                "quality_variants",
+                                "dash_representations",
+                                "music",
+                                "accessibility_caption",
+                                "video_subtitles_uri",
+                            )
+                        }
+                        if m.media_type == "video"
+                        else {}
+                    ),
+                    "extra": m.extra,
                 }
                 for m in self.media
             ],

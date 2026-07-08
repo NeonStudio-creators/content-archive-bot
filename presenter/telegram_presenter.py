@@ -87,6 +87,90 @@ class TelegramPresenter:
             return f'<a href="{th.href(url)}">{th.esc(label)}</a>'
         return th.esc(label)
 
+    @staticmethod
+    def _format_bitrate(bps: int | float | None) -> str:
+        if not bps:
+            return "—"
+        mbps = bps / 1_000_000
+        return f"{mbps:.1f} Mbps" if mbps >= 1 else f"{bps / 1000:.0f} Kbps"
+
+    def _format_video_technical(self, asset: MediaAsset) -> list[str]:
+        """Блок технических данных видео."""
+        if asset.media_type != "video":
+            return []
+
+        e = asset.extra
+        lines: list[str] = [self._sep(), "🎬 <b>Видео — технические данные</b>"]
+
+        res = e.get("resolution") or (
+            f"{asset.width}x{asset.height}"
+            if asset.width and asset.height
+            else None
+        )
+        if res:
+            lines.append(f"  📐 <b>Разрешение:</b> {th.esc(str(res))}")
+
+        fps = e.get("fps")
+        if fps:
+            lines.append(f"  🎞 <b>FPS:</b> {fps}")
+
+        if asset.duration_sec:
+            lines.append(f"  ⏱ <b>Длительность:</b> {asset.duration_sec:.1f} с")
+
+        if e.get("aspect_ratio"):
+            lines.append(f"  📏 <b>Соотношение:</b> {e['aspect_ratio']}")
+
+        codec = e.get("video_codec") or (
+            ", ".join(e["codecs"]) if e.get("codecs") else None
+        )
+        if codec:
+            lines.append(f"  🧩 <b>Кодек:</b> <code>{th.esc(str(codec))}</code>")
+
+        if e.get("audio_codec"):
+            lines.append(f"  🔊 <b>Аудио:</b> <code>{th.esc(e['audio_codec'])}</code>")
+        elif e.get("has_audio") is not None:
+            lines.append(f"  🔊 <b>Звук:</b> {'да' if e['has_audio'] else 'нет'}")
+
+        if e.get("bandwidth_bps"):
+            lines.append(f"  📶 <b>Битрейт:</b> {self._format_bitrate(e['bandwidth_bps'])}")
+
+        if e.get("number_of_qualities"):
+            lines.append(f"  📊 <b>Вариантов качества:</b> {e['number_of_qualities']}")
+
+        if e.get("view_count"):
+            lines.append(f"  👁 <b>Просмотры:</b> {e['view_count']:,}")
+
+        variants = e.get("quality_variants") or []
+        if len(variants) > 1:
+            lines.append("  <b>Доступные качества:</b>")
+            for v in variants[:5]:
+                w, h = v.get("width"), v.get("height")
+                if w and h:
+                    lines.append(f"    • {w}×{h}")
+
+        dash_reps = e.get("dash_representations") or []
+        for rep in dash_reps[:3]:
+            if rep.get("fps") and not fps:
+                lines.append(f"  🎞 <b>FPS (DASH):</b> {rep['fps']}")
+            w, h = rep.get("width"), rep.get("height")
+            if w and h and not res:
+                lines.append(f"  📐 <b>DASH:</b> {w}×{h}")
+
+        music = e.get("music") or {}
+        if music.get("title") or music.get("artist"):
+            lines.append(
+                f"  🎵 <b>Музыка:</b> {th.esc(music.get('artist', ''))} — "
+                f"{th.esc(music.get('title', ''))}"
+            )
+
+        if e.get("accessibility_caption"):
+            lines.append(
+                f"  ♿ <i>{th.esc(str(e['accessibility_caption'])[:120])}</i>"
+            )
+
+        lines.append("")
+        return lines
+
     def _pick_preview_media(self, bundle: ArchiveBundle) -> MediaAsset | None:
         valid = [m for m in bundle.media if m.url and m.url.startswith("http")]
         if not valid:
@@ -166,6 +250,12 @@ class TelegramPresenter:
             lines.append("  ".join(stats))
             lines.append("")
 
+        # Технические данные видео — сразу после статистики
+        for asset in bundle.media:
+            if asset.media_type == "video":
+                lines.extend(self._format_video_technical(asset))
+                break
+
         if m.biography:
             lines.append(self._sep())
             lines.append("📝 <b>Био</b>")
@@ -193,10 +283,21 @@ class TelegramPresenter:
             for i, asset in enumerate(bundle.media[:12], 1):
                 icon = "🎬" if asset.media_type == "video" else "🖼"
                 dur = f" · {asset.duration_sec:.0f}s" if asset.duration_sec else ""
-                # Короткая подпись ссылки — URL только в href
+                spec = ""
+                if asset.media_type == "video":
+                    ex = asset.extra
+                    parts = []
+                    if ex.get("resolution") or (asset.width and asset.height):
+                        parts.append(
+                            ex.get("resolution") or f"{asset.width}×{asset.height}"
+                        )
+                    if ex.get("fps"):
+                        parts.append(f"{ex['fps']}fps")
+                    if parts:
+                        spec = f" ({', '.join(parts)})"
                 lines.append(
                     f'  {i}. {icon} <a href="{th.href(asset.url)}">'
-                    f"медиа #{i}</a>{dur}"
+                    f"медиа #{i}</a>{dur}{th.esc(spec)}"
                 )
             if len(bundle.media) > 12:
                 lines.append(f"  <i>+{len(bundle.media) - 12} в JSON</i>")

@@ -47,6 +47,18 @@ def _rest_item_to_node(item: dict[str, Any], shortcode: str | None = None) -> di
         },
         "product_type": item.get("product_type"),
         "location": item.get("location"),
+        "video_versions": item.get("video_versions"),
+        "video_dash_manifest": item.get("video_dash_manifest"),
+        "has_audio": item.get("has_audio"),
+        "video_codec": item.get("video_codec"),
+        "audio_codec": item.get("audio_codec"),
+        "is_dash_eligible": item.get("is_dash_eligible"),
+        "number_of_qualities": item.get("number_of_qualities"),
+        "clips_metadata": item.get("clips_metadata"),
+        "video_subtitles_uri": item.get("video_subtitles_uri"),
+        "accessibility_caption": item.get("accessibility_caption"),
+        "original_width": item.get("original_width"),
+        "original_height": item.get("original_height"),
     }
 
     dimensions = {}

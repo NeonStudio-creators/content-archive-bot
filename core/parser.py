@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from core.fetcher import ResolvedLink
+from core.video_meta import build_video_technical, pick_best_version, extract_video_versions
 from core.models import (
     ActivityRecord,
     ArchiveBundle,
@@ -55,19 +56,53 @@ def _parse_media_node(node: dict[str, Any]) -> list[MediaAsset]:
             assets.extend(_parse_media_node(child))
         return assets
 
-    is_video = node.get("is_video") or media_type in ("GraphVideo", "XDTVideoMedia")
+    is_video = bool(
+        node.get("is_video")
+        or node.get("media_type") == 2
+        or media_type in ("GraphVideo", "XDTVideoMedia")
+        or node.get("video_url")
+    )
+
     url = _best_image(node)
-    video_url = node.get("video_url")
+    versions = extract_video_versions(node)
+    best_v = pick_best_version(versions)
+    video_url = (best_v or {}).get("url") or node.get("video_url")
+
+    width = (
+        node.get("dimensions", {}).get("width")
+        or node.get("original_width")
+        or (best_v or {}).get("width")
+    )
+    height = (
+        node.get("dimensions", {}).get("height")
+        or node.get("original_height")
+        or (best_v or {}).get("height")
+    )
+
+    extra: dict[str, Any] = {
+        "shortcode": node.get("shortcode"),
+        "product_type": node.get("product_type"),
+    }
+
+    if is_video:
+        tech = build_video_technical(node)
+        extra.update(tech)
+        if tech.get("width"):
+            width = tech["width"]
+        if tech.get("height"):
+            height = tech["height"]
+        if tech.get("video_url_best"):
+            video_url = tech["video_url_best"]
 
     assets.append(
         MediaAsset(
             id=str(node.get("id", "")),
             media_type="video" if is_video else "image",
             url=video_url or url or "",
-            width=node.get("dimensions", {}).get("width"),
-            height=node.get("dimensions", {}).get("height"),
+            width=width,
+            height=height,
             thumbnail_url=node.get("thumbnail_src") or url,
-            duration_sec=node.get("video_duration"),
+            duration_sec=node.get("video_duration") or extra.get("duration_sec"),
             caption=(
                 node.get("edge_media_to_caption", {})
                 .get("edges", [{}])[0]
@@ -77,13 +112,7 @@ def _parse_media_node(node: dict[str, Any]) -> list[MediaAsset]:
                 else node.get("caption")
             ),
             taken_at=_ts(node.get("taken_at_timestamp") or node.get("taken_at")),
-            extra={
-                "shortcode": node.get("shortcode"),
-                "product_type": node.get("product_type"),
-                "has_audio": node.get("has_audio"),
-                "video_codec": node.get("video_codec"),
-                "accessibility_caption": node.get("accessibility_caption"),
-            },
+            extra=extra,
         )
     )
     return assets
@@ -266,6 +295,10 @@ class EntityDeepCollector:
                 metadata.raw_fields["owner_bio"] = owner_user.get("biography")
 
         media = _parse_media_node(media_node)
+        video_assets = [a for a in media if a.media_type == "video"]
+        if video_assets:
+            metadata.raw_fields["video_technical"] = video_assets[0].extra
+
         relations: list[RelationEdge] = []
         activity: list[ActivityRecord] = []
 
