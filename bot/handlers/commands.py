@@ -1,5 +1,5 @@
 """
-Обработчики /start и /help — стиль @reTikTok_bot.
+Обработчики /start и /help.
 """
 
 from __future__ import annotations
@@ -11,47 +11,54 @@ from aiogram.types import Message
 router = Router(name="commands")
 
 START_TEXT = """
-⚡ <b>re:Instagram</b> Checker
+<b>ContentExplorer</b>
+Архиватор контента Instagram
 
-<blockquote><b>❤️ Main features</b>
-🧲 Send an Instagram link — instant analysis
-🧲 Video preview at the top of the message
-🧲 Author &amp; Video buttons below the media
-🧲 Exact statistics: views, likes, comments
-🧲 Quality data: resolution, FPS, bitrate, codec
-🧲 Full JSON dump as a second message</blockquote>
+<b>Возможности</b>
+───────────────
+Ссылка · мгновенный анализ публикации или профиля
+Превью · видео или фото в начале сообщения
+Кнопки · Автор и Видео под медиа
+Статистика · просмотры, лайки, комментарии
+Качество · разрешение, FPS, битрейт, кодек
+Архив · полный JSON вторым сообщением
 
-<blockquote><b>❤️ Supported links</b>
-🧲 Profile — <code>instagram.com/username</code>
-👻🧲 Post — <code>instagram.com/p/…</code>
-👻🧲 Reel — <code>instagram.com/reel/…</code>
-👻🧲 Story — <code>instagram.com/stories/user/id</code>
-👻🧲 Highlight — <code>instagram.com/stories/highlights/id</code></blockquote>
+<b>Поддерживаемые ссылки</b>
+───────────────
+Профиль · <code>instagram.com/username</code>
+Пост · <code>instagram.com/p/…</code>
+Reels · <code>instagram.com/reel/…</code>
+Сторис · <code>instagram.com/stories/user/id</code>
+Актуальное · <code>instagram.com/stories/highlights/id</code>
 
-🧲 Just send a link — no commands needed
+Просто отправьте ссылку — команды не нужны.
 """
 
 HELP_TEXT = """
-⚡ <b>re:Instagram</b> Checker · Help
+<b>ContentExplorer</b> · Справка
 
-<blockquote><b>❤️ Checker</b>
-🧲 <b>Author</b> — username, name, followers
-🧲 <b>Video</b> — ID, description, date
-🧲 <b>Statistics</b> — exact view/like/comment counts
-🧲 <b>Quality</b> — resolution, FPS, bitrate, codec
-🧲 <b>Activity</b> — comments and likers
-🧲 <b>Media</b> — direct download links</blockquote>
+<b>Отчёт</b>
+───────────────
+Автор · ник, имя, подписчики
+<blockquote>био автора — в цитате</blockquote>
 
-<blockquote><b>❤️ Output</b>
-🧲 Message 1 — video/photo + checker report
-🧲 Message 2 — full JSON archive</blockquote>
+Публикация · ID, дата, локация
+<blockquote>описание, музыка, комментарии — в цитатах</blockquote>
 
-<blockquote><b>❤️ Admin setup</b>
-🧲 <code>TELEGRAM_BOT_TOKEN</code>
-🧲 <code>SESSION_TOKEN</code> (cookie sessionid)
-🧲 <code>CSRF_TOKEN</code> (optional)</blockquote>
+Статистика · точные числа просмотров и лайков
+Видео · технические параметры файла
+Медиа · прямые ссылки на скачивание
 
-⚡ 🧲 <b>re:Instagram</b>
+<b>Формат вывода</b>
+───────────────
+Сообщение 1 · превью + отчёт
+Сообщение 2 · JSON-архив
+
+<b>Настройка (Railway)</b>
+───────────────
+<code>TELEGRAM_BOT_TOKEN</code>
+<code>SESSION_TOKEN</code>
+<code>CSRF_TOKEN</code> — опционально
 """
 
 
