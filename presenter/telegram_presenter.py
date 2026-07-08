@@ -1,6 +1,6 @@
 """
-TelegramPresenter — форматирование ArchiveBundle для Telegram.
-Сообщение 1: видео/фото сверху + полный отчёт. Сообщение 2: JSON.
+TelegramPresenter — стиль оформления как @reTikTok_bot.
+Видео сверху + checker-отчёт + JSON.
 """
 
 from __future__ import annotations
@@ -11,7 +11,11 @@ import re
 from typing import TYPE_CHECKING
 
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import BufferedInputFile
+from aiogram.types import (
+    BufferedInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 
 from core.models import ArchiveBundle, EntityType, MediaAsset
 from utils import telegram_html as th
@@ -27,26 +31,25 @@ logger = logging.getLogger(__name__)
 TG_MAX_LENGTH = 4096
 TG_CAPTION_MAX = 1024
 
+# Стиль re:TikTok — иерархия маркеров
+_BULLET = "🧲"
+_NEST1 = "👻🧲"
+_NEST2 = "👻👻🧲"
+
 
 class TelegramPresenter:
-    """Красивый вывод: медиа сверху + один отчёт + JSON."""
+    """Оформление в стиле re:TikTok Checker."""
 
-    TYPE_EMOJI = {
-        EntityType.PROFILE: "👤",
-        EntityType.PUBLICATION: "📸",
-        EntityType.STORY: "📖",
-        EntityType.HIGHLIGHT: "⭐",
-        EntityType.COLLECTION: "📁",
-        EntityType.UNKNOWN: "🔗",
-    }
+    BRAND = "re:Instagram"
+    VERSION = "1.0.0"
 
     TYPE_LABEL = {
-        EntityType.PROFILE: "Профиль",
-        EntityType.PUBLICATION: "Публикация",
-        EntityType.STORY: "История",
-        EntityType.HIGHLIGHT: "Хайлайт",
-        EntityType.COLLECTION: "Коллекция",
-        EntityType.UNKNOWN: "Объект",
+        EntityType.PROFILE: "Profile",
+        EntityType.PUBLICATION: "Publication",
+        EntityType.STORY: "Story",
+        EntityType.HIGHLIGHT: "Highlight",
+        EntityType.COLLECTION: "Collection",
+        EntityType.UNKNOWN: "Content",
     }
 
     def __init__(self, settings: Settings) -> None:
@@ -54,121 +57,159 @@ class TelegramPresenter:
         self._ig_base = settings.platform_base_url.rstrip("/")
 
     @staticmethod
-    def _sep(char: str = "─", width: int = 28) -> str:
-        return char * width
+    def _item(text: str, level: int = 0) -> str:
+        prefix = _BULLET if level == 0 else (_NEST1 if level == 1 else _NEST2)
+        return f"{prefix} {text}"
+
+    @staticmethod
+    def _section(title: str, lines: list[str]) -> str:
+        if not lines:
+            return ""
+        body = "\n".join(lines)
+        return f"<blockquote><b>❤️ {th.esc(title)}</b>\n{body}</blockquote>\n"
+
+    def _header(self, mode: str = "Checker") -> str:
+        return f"⚡ <b>{self.BRAND}</b> {mode}\n"
+
+    def _footer(self) -> str:
+        return f"\n⚡ {_BULLET} <b>{self.BRAND}</b>"
 
     def _profile_url(self, username: str) -> str:
         return f"{self._ig_base}/{username.strip('/')}/"
 
-    def _profile_link(
-        self,
-        username: str | None,
-        label: str | None = None,
-    ) -> str:
+    def _profile_link(self, username: str | None, label: str | None = None) -> str:
         if not username:
-            return ""
+            return "—"
         text = label or f"@{username}"
-        return f'<a href="{th.href(self._profile_url(username))}">{th.esc(text)}</a>'
+        return (
+            f'<a href="{th.href(self._profile_url(username))}">{th.esc(text)}</a>'
+        )
 
     def _actor_link(self, username: str | None) -> str:
         if not username:
-            return "?"
+            return "—"
         return self._profile_link(username, f"@{username}")
-
-    def _relation_label(self, rel_type: str, label: str) -> str:
-        if re.fullmatch(r"[A-Za-z0-9_.]+", label) and rel_type in {
-            "tagged_user", "cohost", "related_profile", "liker", "tagged_in",
-        }:
-            return self._profile_link(label, f"@{label}")
-        if re.fullmatch(r"[A-Za-z0-9_-]+", label) and rel_type in {
-            "publication", "reel", "saved_publication",
-        }:
-            url = f"{self._ig_base}/p/{label}/"
-            return f'<a href="{th.href(url)}">{th.esc(label)}</a>'
-        return th.esc(label)
 
     @staticmethod
     def _format_bitrate(bps: int | float | None) -> str:
         if not bps:
             return "—"
         mbps = bps / 1_000_000
-        return f"{mbps:.1f} Mbps" if mbps >= 1 else f"{bps / 1000:.0f} Kbps"
+        return f"{mbps:.2f} Mbps" if mbps >= 1 else f"{bps / 1000:.0f} Kbps"
 
-    def _format_video_technical(self, asset: MediaAsset) -> list[str]:
-        """Блок технических данных видео."""
+    def _build_keyboard(self, bundle: ArchiveBundle) -> InlineKeyboardMarkup | None:
+        buttons: list[InlineKeyboardButton] = []
+        m = bundle.metadata
+
+        if m.username:
+            buttons.append(
+                InlineKeyboardButton(
+                    text="👤 Author",
+                    url=self._profile_url(m.username),
+                )
+            )
+        if bundle.source_url:
+            buttons.append(
+                InlineKeyboardButton(text="🎬 Video", url=bundle.source_url)
+            )
+
+        if not buttons:
+            return None
+        return InlineKeyboardMarkup(inline_keyboard=[buttons])
+
+    def _quality_lines(self, asset: MediaAsset) -> list[str]:
         if asset.media_type != "video":
             return []
 
         e = asset.extra
-        lines: list[str] = [self._sep(), "🎬 <b>Видео — технические данные</b>"]
+        lines: list[str] = []
 
         res = e.get("resolution") or (
-            f"{asset.width}x{asset.height}"
+            f"{asset.width}×{asset.height}"
             if asset.width and asset.height
             else None
         )
         if res:
-            lines.append(f"  📐 <b>Разрешение:</b> {th.esc(str(res))}")
+            lines.append(self._item(f"Resolution: <b>{th.esc(str(res))}</b>"))
 
         fps = e.get("fps")
         if fps:
-            lines.append(f"  🎞 <b>FPS:</b> {fps}")
+            lines.append(self._item(f"FPS: <b>{fps}</b>"))
 
         if asset.duration_sec:
-            lines.append(f"  ⏱ <b>Длительность:</b> {asset.duration_sec:.1f} с")
-
-        if e.get("aspect_ratio"):
-            lines.append(f"  📏 <b>Соотношение:</b> {e['aspect_ratio']}")
+            lines.append(self._item(f"Duration: <b>{asset.duration_sec:.2f}s</b>"))
 
         codec = e.get("video_codec") or (
             ", ".join(e["codecs"]) if e.get("codecs") else None
         )
         if codec:
-            lines.append(f"  🧩 <b>Кодек:</b> <code>{th.esc(str(codec))}</code>")
+            lines.append(self._item(f"Codec: <code>{th.esc(str(codec))}</code>"))
 
         if e.get("audio_codec"):
-            lines.append(f"  🔊 <b>Аудио:</b> <code>{th.esc(e['audio_codec'])}</code>")
+            lines.append(
+                self._item(f"Audio codec: <code>{th.esc(e['audio_codec'])}</code>")
+            )
         elif e.get("has_audio") is not None:
-            lines.append(f"  🔊 <b>Звук:</b> {'да' if e['has_audio'] else 'нет'}")
+            lines.append(
+                self._item(f"Audio: <b>{'yes' if e['has_audio'] else 'no'}</b>")
+            )
 
         if e.get("bandwidth_bps"):
-            lines.append(f"  📶 <b>Битрейт:</b> {self._format_bitrate(e['bandwidth_bps'])}")
+            lines.append(
+                self._item(f"Bitrate: <b>{self._format_bitrate(e['bandwidth_bps'])}</b>")
+            )
 
         if e.get("number_of_qualities"):
-            lines.append(f"  📊 <b>Вариантов качества:</b> {e['number_of_qualities']}")
+            lines.append(
+                self._item(f"Quality variants: <b>{e['number_of_qualities']}</b>")
+            )
 
-        if e.get("view_count"):
-            lines.append(f"  👁 <b>Просмотры:</b> {e['view_count']:,}")
+        if e.get("aspect_ratio"):
+            lines.append(self._item(f"Aspect ratio: <b>{e['aspect_ratio']}</b>"))
+
+        if e.get("product_type"):
+            lines.append(
+                self._item(f"Format: <b>{th.esc(str(e['product_type']))}</b>")
+            )
 
         variants = e.get("quality_variants") or []
-        if len(variants) > 1:
-            lines.append("  <b>Доступные качества:</b>")
-            for v in variants[:5]:
-                w, h = v.get("width"), v.get("height")
-                if w and h:
-                    lines.append(f"    • {w}×{h}")
+        shown = 0
+        for v in variants:
+            w, h = v.get("width"), v.get("height")
+            if w and h:
+                lines.append(self._item(f"{w}×{h}", level=1))
+                shown += 1
+            if shown >= 5:
+                break
 
         dash_reps = e.get("dash_representations") or []
         for rep in dash_reps[:3]:
-            if rep.get("fps") and not fps:
-                lines.append(f"  🎞 <b>FPS (DASH):</b> {rep['fps']}")
             w, h = rep.get("width"), rep.get("height")
-            if w and h and not res:
-                lines.append(f"  📐 <b>DASH:</b> {w}×{h}")
+            rfps = rep.get("fps")
+            parts = []
+            if w and h:
+                parts.append(f"{w}×{h}")
+            if rfps:
+                parts.append(f"{rfps}fps")
+            if rep.get("codec"):
+                parts.append(th.esc(str(rep["codec"])[:20]))
+            if parts:
+                lines.append(self._item("DASH: " + " · ".join(parts), level=1))
 
         music = e.get("music") or {}
         if music.get("title") or music.get("artist"):
             lines.append(
-                f"  🎵 <b>Музыка:</b> {th.esc(music.get('artist', ''))} — "
-                f"{th.esc(music.get('title', ''))}"
+                self._item(
+                    f"Music: {th.esc(music.get('artist', ''))} — "
+                    f"{th.esc(music.get('title', ''))}"
+                )
             )
 
         if e.get("accessibility_caption"):
             lines.append(
-                f"  ♿ <i>{th.esc(str(e['accessibility_caption'])[:120])}</i>"
+                self._item(f"<i>{th.esc(str(e['accessibility_caption'])[:100])}</i>")
             )
 
-        lines.append("")
         return lines
 
     def _pick_preview_media(self, bundle: ArchiveBundle) -> MediaAsset | None:
@@ -182,179 +223,162 @@ class TelegramPresenter:
 
     def format_full_report(self, bundle: ArchiveBundle) -> str:
         m = bundle.metadata
-        emoji = self.TYPE_EMOJI.get(bundle.resolved_type, "🔗")
-        label = self.TYPE_LABEL.get(bundle.resolved_type, "Объект")
-
-        lines: list[str] = [
-            f"{emoji} <b>CONTENT EXPLORER</b>",
-            self._sep("━"),
-            f"<b>{label}</b>  ·  <code>{th.esc(m.entity_id or '—')}</code>",
-            "",
-        ]
-
-        info: list[str] = []
-        if m.username:
-            info.append(f"👤 {self._profile_link(m.username)}")
-        if m.display_name:
-            if m.username:
-                info.append(f"📛 {self._profile_link(m.username, m.display_name)}")
-            else:
-                info.append(f"📛 {th.esc(m.display_name)}")
-        if m.title:
-            info.append(f"🏷 <code>{th.esc(m.title)}</code>")
-        if m.is_verified:
-            info.append("✅ Верифицирован")
-        if m.is_private:
-            info.append("🔒 Приватный")
-        if m.location:
-            info.append(f"📍 {th.esc(m.location)}")
-        if m.external_url:
-            info.append(
-                f'🌐 <a href="{th.href(m.external_url)}">Внешняя ссылка</a>'
-            )
-        if info:
-            lines.extend(info)
-            lines.append("")
-
-        stats: list[str] = []
-        if m.follower_count is not None:
-            stats.append(f"👥 <b>{m.follower_count:,}</b>")
-        if m.following_count is not None:
-            stats.append(f"➡️ <b>{m.following_count:,}</b>")
-        if m.publication_count is not None:
-            stats.append(f"📷 <b>{m.publication_count:,}</b>")
-        if m.like_count is not None:
-            stats.append(f"❤️ <b>{m.like_count:,}</b>")
-        if m.comment_count is not None:
-            stats.append(f"💬 <b>{m.comment_count:,}</b>")
-        if m.view_count is not None:
-            stats.append(f"👁 <b>{m.view_count:,}</b>")
-
+        label = self.TYPE_LABEL.get(bundle.resolved_type, "Content")
         owner_extra = m.raw_fields or {}
-        if owner_extra.get("owner_followers"):
-            lines.append(self._sep())
-            lines.append("👤 <b>Автор (расширено)</b>")
-            if m.username:
-                lines.append(f"  {self._profile_link(m.username)}")
-            lines.append(
-                f"  👥 {owner_extra['owner_followers']:,} подп. · "
-                f"📷 {owner_extra.get('owner_posts', '?')} постов"
+
+        parts: list[str] = [self._header("Checker")]
+
+        # ── Author ──
+        author_lines: list[str] = []
+        if m.username:
+            author_lines.append(self._item(f"Username: {self._profile_link(m.username)}"))
+        if m.display_name:
+            author_lines.append(
+                self._item(
+                    f"Name: {self._profile_link(m.username, m.display_name) if m.username else th.esc(m.display_name)}"
+                )
             )
-            if owner_extra.get("owner_bio"):
-                lines.append(f"  <i>{th.esc(owner_extra['owner_bio'][:200])}</i>")
-            lines.append("")
+        if m.is_verified:
+            author_lines.append(self._item("Verified: <b>yes</b>"))
+        if m.is_private:
+            author_lines.append(self._item("Private: <b>yes</b>"))
+        if m.follower_count is not None:
+            author_lines.append(
+                self._item(f"Followers: <b>{m.follower_count:,}</b>")
+            )
+        if m.following_count is not None:
+            author_lines.append(
+                self._item(f"Following: <b>{m.following_count:,}</b>")
+            )
+        if owner_extra.get("owner_followers"):
+            author_lines.append(
+                self._item(f"Author followers: <b>{owner_extra['owner_followers']:,}</b>", level=1)
+            )
+        if owner_extra.get("owner_bio"):
+            author_lines.append(
+                self._item(f"<i>{th.esc(owner_extra['owner_bio'][:150])}</i>", level=1)
+            )
+        if author_lines:
+            parts.append(self._section("Author", author_lines))
 
-        if stats:
-            lines.append(self._sep())
-            lines.append("📊 <b>Статистика</b>")
-            lines.append("  ".join(stats))
-            lines.append("")
+        # ── Video / Content ──
+        content_lines: list[str] = [
+            self._item(f"Type: <b>{th.esc(label)}</b>"),
+        ]
+        if m.entity_id:
+            content_lines.append(self._item(f"ID: <code>{th.esc(m.entity_id)}</code>"))
+        if m.title:
+            content_lines.append(self._item(f"Shortcode: <code>{th.esc(m.title)}</code>"))
+        if m.created_at:
+            content_lines.append(
+                self._item(f"Created: <b>{m.created_at.strftime('%d.%m.%Y %H:%M')} UTC</b>")
+            )
+        if m.description:
+            content_lines.append(self._item(f"Description: <i>{th.esc(m.description[:400])}</i>"))
+        elif m.biography:
+            content_lines.append(self._item(f"Bio: <i>{th.esc(m.biography[:400])}</i>"))
+        if m.location:
+            content_lines.append(self._item(f"Location: {th.esc(m.location)}"))
+        if m.external_url:
+            content_lines.append(
+                self._item(f'<a href="{th.href(m.external_url)}">External link</a>')
+            )
+        parts.append(self._section("Video" if bundle.resolved_type == EntityType.PUBLICATION else "Content", content_lines))
 
-        # Технические данные видео — сразу после статистики
+        # ── Statistics (точные числа как re:TikTok) ──
+        stat_lines: list[str] = []
+        if m.view_count is not None:
+            stat_lines.append(self._item(f"👁 <b>{m.view_count:,}</b> views"))
+        if m.like_count is not None:
+            stat_lines.append(self._item(f"❤️ <b>{m.like_count:,}</b> likes"))
+        if m.comment_count is not None:
+            stat_lines.append(self._item(f"💬 <b>{m.comment_count:,}</b> comments"))
+        if m.publication_count is not None:
+            stat_lines.append(self._item(f"📷 <b>{m.publication_count:,}</b> posts"))
+        for k, v in (bundle.collection_stats or {}).items():
+            stat_lines.append(self._item(f"{th.esc(k)}: <b>{v}</b>", level=1))
+        if stat_lines:
+            parts.append(self._section("Statistics", stat_lines))
+
+        # ── Quality ──
         for asset in bundle.media:
             if asset.media_type == "video":
-                lines.extend(self._format_video_technical(asset))
+                ql = self._quality_lines(asset)
+                if ql:
+                    parts.append(self._section("Quality", ql))
                 break
 
-        if m.biography:
-            lines.append(self._sep())
-            lines.append("📝 <b>Био</b>")
-            lines.append(f"<i>{th.esc(m.biography[:500])}</i>")
-            lines.append("")
-        if m.description and m.description != m.biography:
-            lines.append(self._sep())
-            lines.append("💬 <b>Текст</b>")
-            lines.append(f"<i>{th.esc(m.description[:600])}</i>")
-            lines.append("")
+        # ── Tags & mentions ──
+        tag_lines: list[str] = []
         if m.tags:
-            lines.append(f"🏷 {' '.join(th.esc(t) for t in m.tags[:20])}")
-            lines.append("")
+            tag_lines.append(self._item(" ".join(th.esc(t) for t in m.tags[:15])))
+        for u in (owner_extra.get("mentions") or [])[:8]:
+            tag_lines.append(self._item(self._profile_link(u), level=1))
+        if tag_lines:
+            parts.append(self._section("Tags", tag_lines))
 
-        mentions = owner_extra.get("mentions") or []
-        if mentions:
-            lines.append(
-                "📢 " + " ".join(self._profile_link(u) for u in mentions[:10])
-            )
-            lines.append("")
-
+        # ── Media links ──
         if bundle.media:
-            lines.append(self._sep())
-            lines.append(f"🖼 <b>Медиа</b> ({len(bundle.media)})")
-            for i, asset in enumerate(bundle.media[:12], 1):
+            media_lines: list[str] = []
+            for i, asset in enumerate(bundle.media[:8], 1):
                 icon = "🎬" if asset.media_type == "video" else "🖼"
-                dur = f" · {asset.duration_sec:.0f}s" if asset.duration_sec else ""
-                spec = ""
-                if asset.media_type == "video":
-                    ex = asset.extra
-                    parts = []
-                    if ex.get("resolution") or (asset.width and asset.height):
-                        parts.append(
-                            ex.get("resolution") or f"{asset.width}×{asset.height}"
-                        )
-                    if ex.get("fps"):
-                        parts.append(f"{ex['fps']}fps")
-                    if parts:
-                        spec = f" ({', '.join(parts)})"
-                lines.append(
-                    f'  {i}. {icon} <a href="{th.href(asset.url)}">'
-                    f"медиа #{i}</a>{dur}{th.esc(spec)}"
+                media_lines.append(
+                    self._item(
+                        f'{icon} <a href="{th.href(asset.url)}">Download #{i}</a>',
+                        level=1,
+                    )
                 )
-            if len(bundle.media) > 12:
-                lines.append(f"  <i>+{len(bundle.media) - 12} в JSON</i>")
-            lines.append("")
+            if len(bundle.media) > 8:
+                media_lines.append(
+                    self._item(f"+{len(bundle.media) - 8} more in JSON", level=1)
+                )
+            parts.append(self._section("Media", [self._item(f"Files: <b>{len(bundle.media)}</b>")] + media_lines))
 
+        # ── Relations ──
         if bundle.relations:
-            lines.append(self._sep())
-            lines.append(f"🔗 <b>Связи</b> ({len(bundle.relations)})")
-            for rel in bundle.relations[:12]:
-                lines.append(
-                    f"  • <code>{th.esc(rel.relation_type)}</code> "
-                    f"{self._relation_label(rel.relation_type, rel.target_label)}"
+            rel_lines: list[str] = []
+            for rel in bundle.relations[:8]:
+                label_txt = rel.target_label
+                if re.fullmatch(r"[A-Za-z0-9_.]+", label_txt):
+                    label_html = self._profile_link(label_txt, f"@{label_txt}")
+                else:
+                    label_html = th.esc(label_txt)
+                rel_lines.append(
+                    self._item(
+                        f"<code>{th.esc(rel.relation_type)}</code> {label_html}",
+                        level=1,
+                    )
                 )
-            if len(bundle.relations) > 12:
-                lines.append(f"  <i>+{len(bundle.relations) - 12}</i>")
-            lines.append("")
+            if len(bundle.relations) > 8:
+                rel_lines.append(self._item(f"+{len(bundle.relations) - 8}", level=1))
+            parts.append(self._section("Relations", rel_lines))
 
+        # ── Activity ──
         comments = [a for a in bundle.activity if a.activity_type == "comment"]
         likes = [a for a in bundle.activity if a.activity_type == "like"]
-
-        if comments:
-            lines.append(self._sep())
-            lines.append(f"💬 <b>Комментарии</b> ({len(comments)})")
-            for act in comments[:8]:
-                likes_n = act.extra.get("likes", 0)
-                suffix = f" ❤️{likes_n}" if likes_n else ""
-                content = th.esc((act.content or "")[:100])
-                lines.append(
-                    f"  • {self._actor_link(act.actor)}: <i>{content}</i>{suffix}"
+        if comments or likes:
+            act_lines: list[str] = []
+            if comments:
+                act_lines.append(self._item(f"Comments: <b>{len(comments)}</b>"))
+                for act in comments[:5]:
+                    act_lines.append(
+                        self._item(
+                            f"{self._actor_link(act.actor)}: "
+                            f"<i>{th.esc((act.content or '')[:80])}</i>",
+                            level=1,
+                        )
+                    )
+            if likes:
+                act_lines.append(self._item(f"Likes: <b>{len(likes)}</b>"))
+                likers = " · ".join(
+                    self._actor_link(a.actor) for a in likes[:6] if a.actor
                 )
-            if len(comments) > 8:
-                lines.append(f"  <i>+{len(comments) - 8}</i>")
-            lines.append("")
+                if likers:
+                    act_lines.append(self._item(likers, level=1))
+            parts.append(self._section("Activity", act_lines))
 
-        if likes:
-            lines.append(self._sep())
-            lines.append(f"❤️ <b>Лайки</b> ({len(likes)})")
-            like_links = [self._actor_link(a.actor) for a in likes[:10] if a.actor]
-            lines.append("  " + " · ".join(like_links))
-            if len(likes) > 10:
-                lines.append(f"  <i>+{len(likes) - 10}</i>")
-            lines.append("")
-
-        lines.append(self._sep())
-        parts = [
-            f"📎 {len(bundle.media)} медиа",
-            f"🔗 {len(bundle.relations)} связей",
-            f"💬 {len(bundle.activity)} записей",
-        ]
-        for k, v in (bundle.collection_stats or {}).items():
-            parts.append(f"{k}: {v}")
-        lines.append("📦 <b>Итог:</b> " + " · ".join(parts))
-        lines.append(
-            f'🌐 <a href="{th.href(bundle.source_url)}">Источник</a>'
-        )
-
-        return th.truncate_html("\n".join(lines), TG_MAX_LENGTH)
+        parts.append(self._footer())
+        return th.truncate_html("".join(parts), TG_MAX_LENGTH)
 
     def build_json_dump(self, bundle: ArchiveBundle) -> bytes:
         payload = bundle.to_dict()
@@ -366,21 +390,17 @@ class TelegramPresenter:
         self,
         message: Message,
         text: str,
-        *,
-        caption: bool = False,
+        keyboard: InlineKeyboardMarkup | None = None,
     ) -> None:
-        """Отправка HTML с fallback на plain text."""
-        max_len = TG_CAPTION_MAX if caption else TG_MAX_LENGTH
-        safe = th.truncate_html(text, max_len)
-
+        safe = th.truncate_html(text, TG_MAX_LENGTH)
         try:
-            await message.answer(safe, parse_mode="HTML")
+            await message.answer(
+                safe, parse_mode="HTML", reply_markup=keyboard
+            )
         except TelegramBadRequest as exc:
-            logger.warning("HTML parse error, fallback to plain: %s", exc)
+            logger.warning("HTML fallback: %s", exc)
             plain = th.strip_to_plain(safe)
-            if len(plain) > max_len:
-                plain = plain[: max_len - 20] + "…"
-            await message.answer(plain)
+            await message.answer(plain[:4090], reply_markup=keyboard)
 
     async def send_archive(
         self,
@@ -391,6 +411,7 @@ class TelegramPresenter:
         report = self.format_full_report(bundle)
         preview = self._pick_preview_media(bundle)
         caption = th.truncate_html(report, TG_CAPTION_MAX)
+        keyboard = self._build_keyboard(bundle)
 
         sent = False
         if preview:
@@ -400,55 +421,58 @@ class TelegramPresenter:
                         video=preview.url,
                         caption=caption,
                         parse_mode="HTML",
+                        reply_markup=keyboard,
                     )
                 else:
                     await message.answer_photo(
                         photo=preview.url,
                         caption=caption,
                         parse_mode="HTML",
+                        reply_markup=keyboard,
                     )
                 sent = True
             except TelegramBadRequest as exc:
-                logger.warning("Media+caption HTML error: %s", exc)
+                logger.warning("Media caption error: %s", exc)
                 try:
                     if preview.media_type == "video":
-                        await message.answer_video(video=preview.url)
+                        await message.answer_video(
+                            preview.url, reply_markup=keyboard
+                        )
                     else:
-                        await message.answer_photo(photo=preview.url)
-                    await self._send_html(message, report)
+                        await message.answer_photo(
+                            preview.url, reply_markup=keyboard
+                        )
+                    await self._send_html(message, report, keyboard)
                     sent = True
                 except Exception:
                     pass
 
         if not sent:
-            await self._send_html(message, report)
+            await self._send_html(message, report, keyboard)
 
         json_bytes = self.build_json_dump(bundle)
         filename = (
             f"archive_{bundle.resolved_type.value}_"
             f"{bundle.metadata.entity_id or 'data'}.json"
         )
-        try:
-            await message.answer_document(
-                BufferedInputFile(json_bytes, filename=filename),
-                caption="📄 Полный JSON-дамп",
-            )
-        except TelegramBadRequest:
-            await message.answer_document(
-                BufferedInputFile(json_bytes, filename=filename),
-            )
+        await message.answer_document(
+            BufferedInputFile(json_bytes, filename=filename),
+            caption=f"⚡ {self.BRAND} · JSON dump",
+            parse_mode="HTML",
+        )
 
     async def send_error(self, message: Message, error: str) -> None:
         await message.answer(
-            f"❌ <b>Ошибка</b>\n{self._sep()}\n{th.esc(error)}",
+            f"⚡ <b>{self.BRAND}</b>\n\n"
+            f"{_BULLET} <b>Error</b>\n"
+            f"{_NEST1} {th.esc(error)}",
             parse_mode="HTML",
         )
 
     async def send_processing(self, message: Message, url: str) -> Message:
         return await message.answer(
-            f"⏳ <b>Собираю архив…</b>\n"
-            f"{self._sep()}\n"
-            f"🔗 <code>{th.esc(url)}</code>\n\n"
-            f"<i>Параллельный сбор · подождите</i>",
+            f"⚡ <b>{self.BRAND}</b> Checker\n\n"
+            f"{_BULLET} <b>Analyzing…</b>\n"
+            f"{_NEST1} <code>{th.esc(url)}</code>",
             parse_mode="HTML",
         )

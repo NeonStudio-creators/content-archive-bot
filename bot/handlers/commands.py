@@ -1,5 +1,5 @@
 """
-Обработчики команд /start и /help.
+Обработчики /start и /help — стиль @reTikTok_bot.
 """
 
 from __future__ import annotations
@@ -11,46 +11,47 @@ from aiogram.types import Message
 router = Router(name="commands")
 
 START_TEXT = """
-👋 <b>ContentExplorer</b> — ваш помощник по архивации цифрового контента.
+⚡ <b>re:Instagram</b> Checker
 
-Отправьте ссылку на объект визуальной экосистемы:
-• Профиль — <code>instagram.com/username</code>
-• Публикация — <code>instagram.com/p/…</code> или <code>/reel/…</code>
-• История — <code>instagram.com/stories/username/id</code>
-• Хайлайт — <code>instagram.com/stories/highlights/id</code>
-• Коллекция — <code>instagram.com/user/saved/id</code>
+<blockquote><b>❤️ Main features</b>
+🧲 Send an Instagram link — instant analysis
+🧲 Video preview at the top of the message
+🧲 Author &amp; Video buttons below the media
+🧲 Exact statistics: views, likes, comments
+🧲 Quality data: resolution, FPS, bitrate, codec
+🧲 Full JSON dump as a second message</blockquote>
 
-Бот извлечёт метаданные, медиа, связи и активность через внутренние GraphQL-запросы.
+<blockquote><b>❤️ Supported links</b>
+🧲 Profile — <code>instagram.com/username</code>
+👻🧲 Post — <code>instagram.com/p/…</code>
+👻🧲 Reel — <code>instagram.com/reel/…</code>
+👻🧲 Story — <code>instagram.com/stories/user/id</code>
+👻🧲 Highlight — <code>instagram.com/stories/highlights/id</code></blockquote>
 
-<b>Команды:</b>
-/help — справка
-/start — это сообщение
+🧲 Just send a link — no commands needed
 """
 
 HELP_TEXT = """
-📚 <b>Справка ContentExplorer</b>
+⚡ <b>re:Instagram</b> Checker · Help
 
-<b>Как использовать:</b>
-Просто отправьте ссылку в любом сообщении — бот автоматически её обработает.
+<blockquote><b>❤️ Checker</b>
+🧲 <b>Author</b> — username, name, followers
+🧲 <b>Video</b> — ID, description, date
+🧲 <b>Statistics</b> — exact view/like/comment counts
+🧲 <b>Quality</b> — resolution, FPS, bitrate, codec
+🧲 <b>Activity</b> — comments and likers
+🧲 <b>Media</b> — direct download links</blockquote>
 
-<b>Что собирается:</b>
-• Полные метаданные сущности
-• Медиа-файлы с прямыми URL
-• Связи (теги, связанные профили, ко-авторы)
-• Активность (комментарии и др.)
-• JSON-дамп полного архива
+<blockquote><b>❤️ Output</b>
+🧲 Message 1 — video/photo + checker report
+🧲 Message 2 — full JSON archive</blockquote>
 
-<b>Режим работы:</b>
-«Тихий» — минимум запросов, задержки между вызовами, автоматические ретраи при лимитах.
+<blockquote><b>❤️ Admin setup</b>
+🧲 <code>TELEGRAM_BOT_TOKEN</code>
+🧲 <code>SESSION_TOKEN</code> (cookie sessionid)
+🧲 <code>CSRF_TOKEN</code> (optional)</blockquote>
 
-<b>Настройка (для администратора):</b>
-<code>SESSION_TOKEN</code> — cookie sessionid
-<code>TELEGRAM_BOT_TOKEN</code> — токен бота
-<code>CSRF_TOKEN</code> — опционально, csrftoken
-
-<b>Ограничения:</b>
-• Приватный контент доступен только при авторизованной сессии
-• Telegram может не показать превью некоторых медиа — ссылки всегда в ответе
+⚡ 🧲 <b>re:Instagram</b>
 """
 
 

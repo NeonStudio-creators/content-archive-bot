@@ -8,13 +8,13 @@ import html
 import re
 
 # Telegram parse_mode=HTML поддерживает ограниченный набор тегов
-_ALLOWED_TAGS = frozenset({"b", "i", "code", "a"})
+_ALLOWED_TAGS = frozenset({"b", "i", "code", "a", "blockquote"})
 
 _TAG_OPEN_RE = re.compile(
-    r"<([bi]|code|a)\b([^>]*)>",
+    r"<(blockquote|[bi]|code|a)\b([^>]*)>",
     re.IGNORECASE,
 )
-_TAG_CLOSE_RE = re.compile(r"</([bi]|code|a)>", re.IGNORECASE)
+_TAG_CLOSE_RE = re.compile(r"</(blockquote|[bi]|code|a)>", re.IGNORECASE)
 
 
 def esc(text: str | None) -> str:
