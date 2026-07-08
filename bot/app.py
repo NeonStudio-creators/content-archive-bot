@@ -10,7 +10,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
-from bot.handlers import commands, links
+from bot.handlers import callbacks, commands, links
 from config import Settings
 from core.orchestrator import ArchiveOrchestrator
 from presenter.telegram_presenter import TelegramPresenter
@@ -30,6 +30,7 @@ def create_bot(settings: Settings) -> tuple[Bot, Dispatcher, ArchiveOrchestrator
     presenter = TelegramPresenter(settings)
 
     dp.include_router(commands.setup_commands(orchestrator))
+    dp.include_router(callbacks.setup_callbacks(orchestrator, presenter))
     dp.include_router(links.setup_link_handler(orchestrator, presenter))
 
     # Сохраняем orchestrator в workflow_data для graceful shutdown

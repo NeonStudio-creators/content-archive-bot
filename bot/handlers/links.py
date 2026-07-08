@@ -10,6 +10,7 @@ from aiogram import Router
 from aiogram.types import Message
 
 from core.fetcher import LinkResolver
+from core.models import EntityType
 from core.orchestrator import ArchiveOrchestrator
 from presenter.telegram_presenter import TelegramPresenter
 
@@ -42,13 +43,26 @@ def setup_link_handler(
                 )
                 continue
 
-            status_msg = await presenter.send_processing(message, url)
+            if resolved.entity_type == EntityType.PUBLICATION:
+                status_msg = await message.answer(
+                    f"<b>{presenter.BRAND}</b>\n\n"
+                    f"Загружаю публикацию…\n"
+                    f"<blockquote><code>{url}</code></blockquote>",
+                    parse_mode="HTML",
+                )
+            else:
+                status_msg = await presenter.send_processing(message, url)
 
             try:
-                bundle = await orchestrator.process_url(
-                    LinkResolver.clean_url(url)
-                )
-                await presenter.send_archive(message.bot, message, bundle)
+                clean = LinkResolver.clean_url(url)
+                if resolved.entity_type == EntityType.PUBLICATION:
+                    bundle = await orchestrator.process_publication_quick(clean)
+                    await presenter.send_publication_hub(
+                        message.bot, message, bundle
+                    )
+                else:
+                    bundle = await orchestrator.process_url(clean)
+                    await presenter.send_archive(message.bot, message, bundle)
                 await status_msg.delete()
             except ValueError as exc:
                 logger.warning("ValueError для %s: %s", url, exc)

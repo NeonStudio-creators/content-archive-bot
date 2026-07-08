@@ -38,7 +38,14 @@ class TelegramPresenter:
     """Минималистичное оформление отчётов для Telegram."""
 
     BRAND = "ContentExplorer"
-    VERSION = "1.2.0"
+    VERSION = "1.3.0"
+
+    PUB_MODES = {
+        "prof": "Профиль автора",
+        "aud": "Звук",
+        "vid": "Видео полностью",
+        "hq": "Макс. качество",
+    }
 
     STAT_LABELS = {
         "posts_collected": "Постов собрано",
@@ -826,6 +833,418 @@ class TelegramPresenter:
 
         parts.append(self._footer())
         return th.truncate_html("".join(parts), TG_MAX_LENGTH)
+
+    def build_publication_hub_keyboard(
+        self, shortcode: str
+    ) -> InlineKeyboardMarkup:
+        sc = shortcode[:40]
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="Профиль",
+                        callback_data=f"p:prof:{sc}",
+                    ),
+                    InlineKeyboardButton(
+                        text="Звук",
+                        callback_data=f"p:aud:{sc}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="Видео полностью",
+                        callback_data=f"p:vid:{sc}",
+                    ),
+                    InlineKeyboardButton(
+                        text="HD загрузка",
+                        callback_data=f"p:hq:{sc}",
+                    ),
+                ],
+            ]
+        )
+
+    def format_publication_hub(self, bundle: ArchiveBundle) -> str:
+        m = bundle.metadata
+        parts: list[str] = [
+            f"<b>{self.BRAND}</b>\n",
+            f"{th.esc(self.TYPE_LABEL[EntityType.PUBLICATION])}\n",
+        ]
+
+        if m.username:
+            parts.append(
+                self._kv("Автор", self._profile_link(m.username)) + "\n"
+            )
+
+        stat_bits: list[str] = []
+        if m.view_count is not None:
+            stat_bits.append(f"👁 {m.view_count:,}")
+        if m.like_count is not None:
+            stat_bits.append(f"❤ {m.like_count:,}")
+        if m.comment_count is not None:
+            stat_bits.append(f"💬 {m.comment_count:,}")
+        if stat_bits:
+            parts.append("\n" + " · ".join(stat_bits) + "\n")
+
+        if m.description:
+            parts.append(self._section("Описание"))
+            parts.append(self._quote(m.description, max_len=700))
+
+        has_video = any(a.media_type == "video" for a in bundle.media)
+        hint = (
+            "Выберите, что проверить подробнее:"
+            if has_video
+            else "Выберите раздел для детальной проверки:"
+        )
+        parts.append(f"\n<i>{th.esc(hint)}</i>")
+        parts.append(self._footer())
+        return th.truncate_html("".join(parts), TG_CAPTION_MAX)
+
+    def format_deep_profile(self, bundle: ArchiveBundle) -> str:
+        m = bundle.metadata
+        extra = m.raw_fields or {}
+        parts: list[str] = [
+            f"<b>{self.BRAND}</b>\n",
+            f"<b>{th.esc(self.PUB_MODES['prof'])}</b>\n",
+        ]
+
+        profile_lines: list[str] = []
+        if m.username:
+            profile_lines.append(
+                self._kv("Ник", self._profile_link(m.username))
+            )
+        if m.display_name:
+            profile_lines.append(
+                self._kv(
+                    "Имя",
+                    self._profile_link(m.username, m.display_name)
+                    if m.username
+                    else th.esc(m.display_name),
+                )
+            )
+        flags: list[str] = []
+        if m.is_verified:
+            flags.append("верифицирован")
+        if m.is_private:
+            flags.append("приватный")
+        if extra.get("owner_is_business"):
+            flags.append("бизнес")
+        if flags:
+            profile_lines.append(
+                self._kv("Статус", th.esc(", ".join(flags)))
+            )
+        if extra.get("owner_category"):
+            profile_lines.append(
+                self._kv("Категория", th.esc(str(extra["owner_category"])))
+            )
+        if m.external_url:
+            profile_lines.append(
+                self._kv(
+                    "Сайт",
+                    f'<a href="{th.href(m.external_url)}">'
+                    f"{th.esc(m.external_url[:50])}</a>",
+                )
+            )
+        parts.append(self._section("Автор публикации"))
+        parts.extend(line + "\n" for line in profile_lines)
+
+        bio = m.biography or extra.get("owner_bio")
+        if bio:
+            parts.append(self._section("О себе"))
+            parts.append(self._quote(bio, max_len=600))
+
+        for link in (extra.get("owner_bio_links") or [])[:4]:
+            if isinstance(link, dict):
+                url = link.get("url")
+                title = link.get("title") or url
+                if url:
+                    parts.append(self._quote(f"{title}: {url}", max_len=200))
+
+        stat_lines: list[str] = []
+        if m.follower_count is not None:
+            stat_lines.append(
+                self._kv("Подписчики", f"<b>{m.follower_count:,}</b>")
+            )
+        if m.following_count is not None:
+            stat_lines.append(
+                self._kv("Подписки", f"<b>{m.following_count:,}</b>")
+            )
+        if m.publication_count is not None:
+            stat_lines.append(
+                self._kv("Публикации", f"<b>{m.publication_count:,}</b>")
+            )
+        if stat_lines:
+            parts.append(self._section("Статистика"))
+            parts.extend(line + "\n" for line in stat_lines)
+
+        parts.append(self._footer())
+        return th.truncate_html("".join(parts), TG_MAX_LENGTH)
+
+    def format_deep_audio(self, bundle: ArchiveBundle) -> str:
+        parts: list[str] = [
+            f"<b>{self.BRAND}</b>\n",
+            f"<b>{th.esc(self.PUB_MODES['aud'])}</b>\n",
+        ]
+
+        video_asset = next(
+            (a for a in bundle.media if a.media_type == "video"), None
+        )
+        if not video_asset:
+            parts.append(
+                self._section("Звук")
+                + self._kv("Статус", "<b>нет видео в публикации</b>\n")
+            )
+            parts.append(self._footer())
+            return th.truncate_html("".join(parts), TG_MAX_LENGTH)
+
+        e = video_asset.extra
+        audio_lines: list[str] = []
+
+        if e.get("has_audio") is not None:
+            audio_lines.append(
+                self._kv(
+                    "Звуковая дорожка",
+                    f"<b>{'есть' if e['has_audio'] else 'нет'}</b>",
+                )
+            )
+        if e.get("audio_codec"):
+            audio_lines.append(
+                self._kv(
+                    "Аудиокодек",
+                    f"<code>{th.esc(e['audio_codec'])}</code>",
+                )
+            )
+        if video_asset.duration_sec:
+            audio_lines.append(
+                self._kv(
+                    "Длительность",
+                    f"<b>{video_asset.duration_sec:.1f} с</b>",
+                )
+            )
+
+        music = e.get("music") or {}
+        if music.get("title") or music.get("artist"):
+            parts.append(self._section("Музыка"))
+            if music.get("artist"):
+                parts.append(
+                    self._kv("Исполнитель", th.esc(music["artist"])) + "\n"
+                )
+            if music.get("title"):
+                parts.append(
+                    self._kv("Трек", th.esc(music["title"])) + "\n"
+                )
+            if music.get("duration_ms"):
+                sec = music["duration_ms"] / 1000
+                parts.append(
+                    self._kv("Длина трека", f"<b>{sec:.1f} с</b>") + "\n"
+                )
+            music_text = " — ".join(
+                p for p in (music.get("artist"), music.get("title")) if p
+            )
+            if music_text:
+                parts.append(self._quote(f"♫ {music_text}", max_len=200))
+
+        if e.get("accessibility_caption"):
+            parts.append(self._section("Озвучка / субтитры"))
+            parts.append(
+                self._quote(e["accessibility_caption"], max_len=400)
+            )
+
+        if e.get("video_subtitles_uri"):
+            parts.append(self._section("Субтитры"))
+            parts.append(
+                self._kv(
+                    "Файл",
+                    f'<a href="{th.href(e["video_subtitles_uri"])}">скачать</a>',
+                )
+                + "\n"
+            )
+
+        if audio_lines:
+            parts.append(self._section("Технические данные"))
+            parts.extend(line + "\n" for line in audio_lines)
+
+        if not music and not audio_lines:
+            parts.append(
+                self._section("Звук")
+                + self._kv("Данные", "<b>не найдены</b>\n")
+            )
+
+        parts.append(self._footer())
+        return th.truncate_html("".join(parts), TG_MAX_LENGTH)
+
+    def format_deep_hq(self, bundle: ArchiveBundle) -> str:
+        parts: list[str] = [
+            f"<b>{self.BRAND}</b>\n",
+            f"<b>{th.esc(self.PUB_MODES['hq'])}</b>\n",
+        ]
+
+        media_list = [
+            a for a in bundle.media
+            if a.url and a.url.startswith("http")
+        ]
+        if not media_list:
+            parts.append(
+                self._section("Загрузка")
+                + self._kv("Статус", "<b>ссылки недоступны</b>\n")
+            )
+            parts.append(self._footer())
+            return th.truncate_html("".join(parts), TG_MAX_LENGTH)
+
+        for idx, asset in enumerate(media_list, 1):
+            kind = "видео" if asset.media_type == "video" else "фото"
+            parts.append(self._section(f"Файл #{idx} · {kind}"))
+
+            e = asset.extra if asset.media_type == "video" else {}
+            best_url = e.get("video_url_best") or asset.url
+            res = e.get("resolution") or (
+                f"{asset.width}×{asset.height}"
+                if asset.width and asset.height
+                else None
+            )
+
+            if res:
+                parts.append(self._kv("Лучшее", f"<b>{th.esc(str(res))}</b>") + "\n")
+            parts.append(
+                self._kv(
+                    "Скачать",
+                    f'<a href="{th.href(best_url)}">максимальное качество</a>',
+                )
+                + "\n"
+            )
+
+            variants = sorted(
+                e.get("quality_variants") or [],
+                key=lambda v: (v.get("width") or 0) * (v.get("height") or 0),
+                reverse=True,
+            )
+            if variants:
+                parts.append(self._kv("Варианты", f"<b>{len(variants)}</b>") + "\n")
+                for v in variants[:8]:
+                    w, h = v.get("width"), v.get("height")
+                    url = v.get("url")
+                    if not url:
+                        continue
+                    label = f"{w}×{h}" if w and h else "вариант"
+                    parts.append(
+                        f'  <a href="{th.href(url)}">{th.esc(label)}</a>\n'
+                    )
+                if len(variants) > 8:
+                    parts.append(f"  +{len(variants) - 8} ещё\n")
+
+            dash_reps = sorted(
+                e.get("dash_representations") or [],
+                key=lambda r: (r.get("width") or 0) * (r.get("height") or 0),
+                reverse=True,
+            )
+            if dash_reps:
+                parts.append(self._kv("DASH", f"<b>{len(dash_reps)}</b>") + "\n")
+                for rep in dash_reps[:5]:
+                    w, h = rep.get("width"), rep.get("height")
+                    rfps = rep.get("fps")
+                    codec = rep.get("codec")
+                    bw = rep.get("bandwidth_bps")
+                    label_parts = []
+                    if w and h:
+                        label_parts.append(f"{w}×{h}")
+                    if rfps:
+                        label_parts.append(f"{rfps} fps")
+                    if codec:
+                        label_parts.append(str(codec)[:18])
+                    if bw:
+                        label_parts.append(self._format_bitrate(bw))
+                    if label_parts:
+                        parts.append(
+                            f"  {' · '.join(label_parts)}\n"
+                        )
+
+            if asset.media_type != "video":
+                parts.append(
+                    self._kv(
+                        "Фото",
+                        f'<a href="{th.href(asset.url)}">оригинал</a>',
+                    )
+                    + "\n"
+                )
+
+        parts.append(self._footer())
+        return th.truncate_html("".join(parts), TG_MAX_LENGTH)
+
+    def format_deep_report(
+        self, bundle: ArchiveBundle, mode: str
+    ) -> str:
+        if mode == "prof":
+            return self.format_deep_profile(bundle)
+        if mode == "aud":
+            return self.format_deep_audio(bundle)
+        if mode == "vid":
+            return self.format_full_report(bundle)
+        if mode == "hq":
+            return self.format_deep_hq(bundle)
+        return self.format_full_report(bundle)
+
+    async def send_publication_hub(
+        self,
+        bot: Bot,
+        message: Message,
+        bundle: ArchiveBundle,
+    ) -> None:
+        shortcode = bundle.metadata.title or ""
+        caption = self.format_publication_hub(bundle)
+        keyboard = self.build_publication_hub_keyboard(shortcode)
+        preview = self._pick_preview_media(bundle)
+
+        sent = False
+        if preview:
+            use_photo = preview.media_type != "video"
+            try:
+                if use_photo:
+                    await message.answer_photo(
+                        photo=preview.url,
+                        caption=caption,
+                        parse_mode="HTML",
+                        reply_markup=keyboard,
+                    )
+                else:
+                    await message.answer_video(
+                        video=preview.url,
+                        caption=caption,
+                        parse_mode="HTML",
+                        reply_markup=keyboard,
+                    )
+                sent = True
+            except TelegramBadRequest as exc:
+                logger.warning("Hub media error: %s", exc)
+                try:
+                    if use_photo:
+                        await message.answer_photo(
+                            preview.url, reply_markup=keyboard
+                        )
+                    else:
+                        await message.answer_video(
+                            preview.url, reply_markup=keyboard
+                        )
+                    await self._send_html(message, caption, keyboard)
+                    sent = True
+                except Exception:
+                    pass
+
+        if not sent:
+            await self._send_html(message, caption, keyboard)
+
+    async def send_deep_report(
+        self,
+        bot: Bot,
+        message: Message,
+        bundle: ArchiveBundle,
+        mode: str,
+    ) -> None:
+        if mode == "vid":
+            await self.send_archive(bot, message, bundle)
+            return
+
+        report = self.format_deep_report(bundle, mode)
+        keyboard = self._build_keyboard(bundle)
+        await self._send_html(message, report, keyboard)
 
     def build_json_dump(self, bundle: ArchiveBundle) -> bytes:
         payload = bundle.to_dict()
