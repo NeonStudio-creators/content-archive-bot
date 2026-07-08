@@ -27,7 +27,7 @@ def create_bot(settings: Settings) -> tuple[Bot, Dispatcher, ArchiveOrchestrator
     dp = Dispatcher()
 
     orchestrator = ArchiveOrchestrator(settings)
-    presenter = TelegramPresenter(settings)
+    presenter = TelegramPresenter(settings, fetcher=orchestrator.fetcher)
 
     dp.include_router(commands.setup_commands(orchestrator))
     dp.include_router(callbacks.setup_callbacks(orchestrator, presenter))

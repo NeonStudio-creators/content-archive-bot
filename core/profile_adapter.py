@@ -10,6 +10,35 @@ from typing import Any
 from utils.dict_utils import dig, safe_dict
 
 
+def extract_avatar_url(user: dict[str, Any]) -> str | None:
+    """Достаёт URL аватарки из любого формата ответа API."""
+    for key in ("profile_pic_url_hd", "profile_pic_url"):
+        val = user.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+
+    for key in ("hd_profile_pic_url_info", "profile_pic_url_info"):
+        info = safe_dict(user.get(key))
+        url = info.get("url")
+        if isinstance(url, str) and url.strip():
+            return url.strip()
+
+    for key in ("hd_profile_pic_versions", "profile_pic_versions"):
+        versions = user.get(key)
+        if not isinstance(versions, list) or not versions:
+            continue
+        best = max(
+            versions,
+            key=lambda v: (safe_dict(v).get("width") or 0)
+            * (safe_dict(v).get("height") or 0),
+        )
+        url = safe_dict(best).get("url")
+        if isinstance(url, str) and url.strip():
+            return url.strip()
+
+    return None
+
+
 def normalize_user_node(user: dict[str, Any]) -> dict[str, Any]:
     """Приводит REST/mobile/GraphQL user к ожидаемому parser-ом виду."""
     u = dict(user)
@@ -25,6 +54,12 @@ def normalize_user_node(user: dict[str, Any]) -> dict[str, Any]:
         u["edge_follow"] = {"count": u["following_count"]}
     if "edge_owner_to_timeline_media" not in u and u.get("media_count") is not None:
         u["edge_owner_to_timeline_media"] = {"count": u["media_count"]}
+
+    avatar = extract_avatar_url(u)
+    if avatar:
+        u["profile_pic_url_hd"] = avatar
+        if not u.get("profile_pic_url"):
+            u["profile_pic_url"] = avatar
 
     return u
 

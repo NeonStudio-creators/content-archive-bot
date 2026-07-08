@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from core.fetcher import ResolvedLink
+from core.profile_adapter import extract_avatar_url
 from core.video_meta import build_video_technical, extract_video_versions, pick_best_version
 from utils.dict_utils import dig, safe_dict
 from core.models import (
@@ -268,12 +269,14 @@ class EntityDeepCollector:
             elif isinstance(link, str):
                 bio_links.append({"url": link, "title": None})
 
+        avatar_url = extract_avatar_url(user)
+
         metadata = EntityMetadata(
             entity_id=str(user.get("id", "")),
             entity_type=EntityType.PROFILE,
             username=username,
             display_name=user.get("full_name"),
-            avatar_url=user.get("profile_pic_url_hd") or user.get("profile_pic_url"),
+            avatar_url=avatar_url,
             follower_count=_edge_count(user, "edge_followed_by", "count"),
             following_count=_edge_count(user, "edge_follow", "count"),
             publication_count=_edge_count(user, "edge_owner_to_timeline_media", "count"),
@@ -302,6 +305,8 @@ class EntityDeepCollector:
                 ),
                 "mutual_followers_count": user.get("mutual_followers_count"),
                 "is_joined_recently": user.get("is_joined_recently"),
+                "profile_pic_url": user.get("profile_pic_url"),
+                "hd_profile_pic_url_info": user.get("hd_profile_pic_url_info"),
             },
         )
 
