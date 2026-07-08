@@ -8,6 +8,7 @@ import re
 import xml.etree.ElementTree as ET
 from typing import Any
 
+from core.audio_meta import build_audio_technical
 from utils.dict_utils import safe_dict
 
 
@@ -204,11 +205,26 @@ def build_video_technical(node: dict[str, Any]) -> dict[str, Any]:
         or node.get("clips_music_attribution_info")
     )
     music = safe_dict(music)
-    if music:
+    audio_tech = build_audio_technical(node)
+    if audio_tech.get("music"):
+        tech["music"] = audio_tech["music"]
+    elif music:
         tech["music"] = {
             "title": music.get("title") or music.get("song_name"),
             "artist": music.get("display_artist") or music.get("artist_name"),
             "duration_ms": music.get("duration_in_ms"),
         }
+
+    for key in (
+        "audio_url",
+        "audio_source",
+        "audio_format",
+        "audio_sources",
+        "audio_asset_id",
+        "audio_cluster_id",
+        "music_canonical_id",
+    ):
+        if key in audio_tech and key != "music":
+            tech[key] = audio_tech[key]
 
     return {k: v for k, v in tech.items() if v is not None and v != [] and v != {}}

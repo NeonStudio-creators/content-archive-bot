@@ -38,7 +38,7 @@ class TelegramPresenter:
     """Минималистичное оформление отчётов для Telegram."""
 
     BRAND = "ContentExplorer"
-    VERSION = "1.3.1"
+    VERSION = "1.3.2"
 
     PUB_MODES = {
         "prof": "Профиль автора",
@@ -1059,6 +1059,18 @@ class TelegramPresenter:
                 + "\n"
             )
 
+        source = e.get("audio_source")
+        if source:
+            parts.append(
+                self._kv("Источник", f"<code>{th.esc(str(source))}</code>")
+                + "\n"
+            )
+        fmt = e.get("audio_format")
+        if fmt:
+            parts.append(
+                self._kv("Формат", f"<b>{th.esc(str(fmt).upper())}</b>") + "\n"
+            )
+
         if audio_lines:
             parts.append(self._section("Технические данные"))
             parts.extend(line + "\n" for line in audio_lines)
@@ -1230,6 +1242,52 @@ class TelegramPresenter:
 
         if not sent:
             await self._send_html(message, caption, keyboard)
+
+    async def send_audio_report(
+        self,
+        message: Message,
+        bundle: ArchiveBundle,
+        audio_bytes: bytes,
+        filename: str,
+    ) -> None:
+        """Отправляет скачанный оригинальный аудиофайл."""
+        video = next(
+            (a for a in bundle.media if a.media_type == "video"), None
+        )
+        e = video.extra if video else {}
+        music = e.get("music") or {}
+        caption = self.format_deep_audio(bundle)
+        safe_caption = th.truncate_html(caption, TG_CAPTION_MAX)
+
+        title = (music.get("title") or "Audio")[:64]
+        performer = (music.get("artist") or bundle.metadata.username or "")[
+            :64
+        ]
+        duration = None
+        if music.get("duration_ms"):
+            duration = int(music["duration_ms"] / 1000)
+        elif video and video.duration_sec:
+            duration = int(video.duration_sec)
+
+        audio_file = BufferedInputFile(audio_bytes, filename=filename)
+        try:
+            await message.answer_audio(
+                audio=audio_file,
+                caption=safe_caption,
+                parse_mode="HTML",
+                title=title or None,
+                performer=performer or None,
+                duration=duration,
+            )
+            return
+        except TelegramBadRequest as exc:
+            logger.warning("answer_audio failed: %s", exc)
+
+        await message.answer_document(
+            audio_file,
+            caption=safe_caption,
+            parse_mode="HTML",
+        )
 
     async def send_deep_report(
         self,

@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 from config import Settings
+from core.audio_meta import extract_audio_sources, url_from_audio_block
 from core.auth import SessionAuthManager
 from core.fetcher import GraphQLFetcher, LinkResolver, ResolvedLink
 from core.models import ActivityRecord, ArchiveBundle, EntityType, MediaAsset
@@ -16,6 +18,17 @@ from utils.dict_utils import dig, safe_dict
 from utils.rate_limit import QuietRateLimiter
 
 logger = logging.getLogger(__name__)
+
+
+def _media_node_from_response(media_data: dict) -> dict:
+    data_block = safe_dict(media_data.get("data"))
+    return (
+        safe_dict(data_block.get("shortcode_media"))
+        or safe_dict(data_block.get("xdt_shortcode_media"))
+        or safe_dict(media_data.get("shortcode_media"))
+        or safe_dict(media_data.get("xdt_shortcode_media"))
+        or {}
+    )
 
 
 def _post_engagement(edge: dict) -> int:
@@ -122,7 +135,101 @@ class ArchiveOrchestrator:
             shortcode,
             original_url=resolved.original_url,
         )
-        return self.parser.parse_publication(resolved, media_data)
+        bundle = self.parser.parse_publication(resolved, media_data)
+        if mode == "aud":
+            await self._resolve_publication_audio(
+                bundle, _media_node_from_response(media_data)
+            )
+        return bundle
+
+    async def _resolve_publication_audio(
+        self,
+        bundle: ArchiveBundle,
+        media_node: dict,
+    ) -> None:
+        """Находит прямую ссылку на оригинальный аудиофайл."""
+        video = next(
+            (a for a in bundle.media if a.media_type == "video"), None
+        )
+        if not video:
+            return
+
+        audio_info = extract_audio_sources(media_node)
+        if not audio_info.get("audio_url"):
+            audio_info.update({
+                k: v
+                for k, v in video.extra.items()
+                if k.startswith("audio_") or k == "music_canonical_id"
+            })
+
+        if not audio_info.get("audio_url"):
+            api_block = await self.fetcher.fetch_track_audio_asset(
+                music_canonical_id=audio_info.get("music_canonical_id"),
+                audio_asset_id=audio_info.get("audio_asset_id"),
+                audio_cluster_id=audio_info.get("audio_cluster_id"),
+                referer=bundle.source_url,
+            )
+            if api_block:
+                url = url_from_audio_block(api_block)
+                if url:
+                    audio_info["audio_url"] = url
+                    audio_info["audio_source"] = "api"
+                    if not audio_info.get("music"):
+                        music = {}
+                        if api_block.get("title") or api_block.get("song_name"):
+                            music["title"] = (
+                                api_block.get("title")
+                                or api_block.get("song_name")
+                            )
+                        if api_block.get("display_artist") or api_block.get(
+                            "artist_name"
+                        ):
+                            music["artist"] = (
+                                api_block.get("display_artist")
+                                or api_block.get("artist_name")
+                            )
+                        if api_block.get("duration_in_ms"):
+                            music["duration_ms"] = api_block["duration_in_ms"]
+                        if music:
+                            audio_info["music"] = music
+
+        video.extra.update(audio_info)
+
+    async def download_publication_audio(
+        self, bundle: ArchiveBundle
+    ) -> tuple[bytes, str]:
+        """Скачивает оригинальный аудиофайл публикации."""
+        video = next(
+            (a for a in bundle.media if a.media_type == "video"), None
+        )
+        if not video:
+            raise ValueError("В публикации нет видео — аудиофайл недоступен")
+
+        url = video.extra.get("audio_url")
+        if not url:
+            raise ValueError(
+                "Оригинальный аудиофайл недоступен для этой публикации"
+            )
+
+        data = await self.fetcher.download_bytes(
+            url,
+            referer=bundle.source_url,
+            label="audio_download",
+        )
+        if not data:
+            raise ValueError("Не удалось скачать аудиофайл")
+
+        fmt = video.extra.get("audio_format") or "m4a"
+        music = video.extra.get("music") or {}
+        base = (
+            music.get("title")
+            or bundle.metadata.title
+            or bundle.metadata.username
+            or "audio"
+        )
+        safe_base = re.sub(r"[^\w\-.]+", "_", str(base)).strip("_")[:40]
+        filename = f"{safe_base or 'audio'}.{fmt}"
+        return data, filename
 
     async def process_url(self, url: str) -> ArchiveBundle:
         """Полный пайплайн обработки одной ссылки."""

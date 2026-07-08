@@ -37,7 +37,7 @@ from core.session_bootstrap import (
 )
 from core.models import EntityType
 from utils.concurrency import first_success
-from utils.dict_utils import safe_dict
+from utils.dict_utils import dig, safe_dict
 from utils.instagram_id import shortcode_to_media_id
 from utils.rate_limit import QuietRateLimiter
 from utils.retry import with_retry
@@ -388,6 +388,114 @@ class GraphQLFetcher:
         if isinstance(result, dict):
             return result
         raise ValueError(f"Mobile API {label}: невалидный JSON")
+
+    async def mobile_api_post(
+        self,
+        path: str,
+        *,
+        data: dict[str, Any],
+        referer: str | None = None,
+        label: str = "mobile_api",
+    ) -> dict[str, Any]:
+        """POST к i.instagram.com/api/v1."""
+        url = f"{MOBILE_API_BASE}/{path.lstrip('/')}"
+        result = await self._request(
+            "POST",
+            url,
+            referer=referer,
+            label=label,
+            data={k: str(v) for k, v in data.items()},
+            api_type="mobile",
+        )
+        if isinstance(result, dict):
+            return result
+        raise ValueError(f"Mobile API {label}: невалидный JSON")
+
+    async def download_bytes(
+        self,
+        url: str,
+        *,
+        referer: str | None = None,
+        label: str = "download",
+    ) -> bytes:
+        """Скачивает бинарный файл (аудио/видео) по прямой ссылке."""
+        await self.rate_limiter.wait()
+        session = await self._get_session()
+        headers = self.auth.build_headers(referer=referer, api_type="mobile")
+        cookies = self.auth.build_cookies()
+
+        async def _do_download() -> bytes:
+            async with session.get(
+                url,
+                headers=headers,
+                cookies=cookies,
+                allow_redirects=True,
+            ) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    logger.warning(
+                        "%s: HTTP %s — %s", label, resp.status, body[:200]
+                    )
+                    resp.raise_for_status()
+                return await resp.read()
+
+        return await with_retry(
+            _do_download,
+            max_retries=self.settings.max_retries,
+            backoff_sec=self.settings.retry_backoff_sec,
+            label=label,
+        )
+
+    async def fetch_track_audio_asset(
+        self,
+        *,
+        music_canonical_id: str | None = None,
+        audio_asset_id: str | None = None,
+        audio_cluster_id: str | None = None,
+        referer: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Запрашивает метаданные трека через clips/music/ (оригинальный m4a)."""
+        data: dict[str, Any] = {
+            "tab_type": "clips",
+            "referrer_media_id": "",
+        }
+        if music_canonical_id:
+            data["music_canonical_id"] = str(music_canonical_id)
+        elif audio_asset_id or audio_cluster_id:
+            aid = str(audio_asset_id or audio_cluster_id)
+            data["audio_cluster_id"] = aid
+            data["original_sound_audio_asset_id"] = aid
+        else:
+            return None
+
+        try:
+            result = await self.mobile_api_post(
+                "clips/music/",
+                data=data,
+                referer=referer,
+                label="track_audio",
+            )
+        except Exception as exc:
+            logger.warning("track_audio API: %s", exc)
+            return None
+
+        metadata = safe_dict(result.get("metadata"))
+        for key in ("music_info", "original_sound_info"):
+            block = safe_dict(metadata.get(key))
+            if key == "music_info":
+                block = safe_dict(block.get("music_asset_info")) or block
+            if block:
+                return block
+
+        for path in (
+            ("metadata", "music_info", "music_asset_info"),
+            ("metadata", "original_sound_info"),
+        ):
+            block = dig(result, *path)
+            if isinstance(block, dict) and block:
+                return block
+
+        return None
 
     async def fetch_paginated(
         self,

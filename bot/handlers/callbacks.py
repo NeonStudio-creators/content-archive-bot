@@ -42,11 +42,12 @@ def setup_callbacks(
         label = presenter.PUB_MODES[mode]
         await callback.answer(f"Собираю: {label}…")
 
-        detail = (
-            "посты, reels, отметки, сторис…"
-            if mode == "prof"
-            else label.lower()
-        )
+        if mode == "prof":
+            detail = "посты, reels, отметки, сторис…"
+        elif mode == "aud":
+            detail = "оригинальный аудиофайл…"
+        else:
+            detail = label.lower()
         status = await callback.message.answer(
             f"<b>{presenter.BRAND}</b>\n\n"
             f"Собираю <b>{detail}</b>…\n"
@@ -59,12 +60,23 @@ def setup_callbacks(
                 shortcode,
                 mode,
             )
-            await presenter.send_deep_report(
-                callback.message.bot,
-                callback.message,
-                bundle,
-                mode,
-            )
+            if mode == "aud":
+                audio_bytes, filename = (
+                    await orchestrator.download_publication_audio(bundle)
+                )
+                await presenter.send_audio_report(
+                    callback.message,
+                    bundle,
+                    audio_bytes,
+                    filename,
+                )
+            else:
+                await presenter.send_deep_report(
+                    callback.message.bot,
+                    callback.message,
+                    bundle,
+                    mode,
+                )
             await status.delete()
         except ValueError as exc:
             logger.warning("Deep %s %s: %s", mode, shortcode, exc)

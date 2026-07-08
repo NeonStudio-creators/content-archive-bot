@@ -164,6 +164,10 @@ class ArchiveBundle:
                                 "quality_variants",
                                 "dash_representations",
                                 "music",
+                                "audio_url",
+                                "audio_source",
+                                "audio_format",
+                                "audio_sources",
                                 "accessibility_caption",
                                 "video_subtitles_uri",
                             )
