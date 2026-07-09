@@ -17,12 +17,11 @@ class InnertubeClient:
     client_id: int
     client_extra: dict[str, Any] = field(default_factory=dict)
     needs_cookies: bool = False
-    prefer_cookies: bool = False
     embed_url: str | None = None
 
 
-# Порядок: сначала клиенты без обязательной авторизации.
-INNERTUBE_CLIENTS: tuple[InnertubeClient, ...] = (
+# Без cookies — пробуем первыми (не портим устаревшей сессией).
+ANON_INNERTUBE_CLIENTS: tuple[InnertubeClient, ...] = (
     InnertubeClient(
         name="ANDROID_VR",
         version="1.65.10",
@@ -49,29 +48,7 @@ INNERTUBE_CLIENTS: tuple[InnertubeClient, ...] = (
             "Chrome/124.0.0.0 Safari/537.36"
         ),
         client_extra={"clientScreen": "EMBED"},
-        embed_url="https://www.youtube.com/embed/{video_id}",
-    ),
-    InnertubeClient(
-        name="TVHTML5",
-        version="7.20260114.12.00",
-        client_id=7,
-        user_agent=(
-            "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/25.lts.30.1034943-gold "
-            "(unlike Gecko), Unknown_TV_Unknown_0/Unknown (Unknown, Unknown)"
-        ),
-        client_extra={"clientFormFactor": "UNKNOWN_FORM_FACTOR"},
-        prefer_cookies=True,
-    ),
-    InnertubeClient(
-        name="MWEB",
-        version="2.20260115.01.00",
-        client_id=2,
-        user_agent=(
-            "Mozilla/5.0 (iPad; CPU OS 16_7_10 like Mac OS X) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-            "Version/16.6 Mobile/15E148 Safari/604.1,gzip(gfe)"
-        ),
-        prefer_cookies=True,
+        embed_url="https://www.reddit.com/",
     ),
     InnertubeClient(
         name="ANDROID",
@@ -98,6 +75,21 @@ INNERTUBE_CLIENTS: tuple[InnertubeClient, ...] = (
             "osVersion": "18.3.2.22D82",
         },
     ),
+)
+
+# С валидными cookies — основной путь с IP датацентра (Railway).
+AUTH_INNERTUBE_CLIENTS: tuple[InnertubeClient, ...] = (
+    InnertubeClient(
+        name="MWEB",
+        version="2.20260115.01.00",
+        client_id=2,
+        user_agent=(
+            "Mozilla/5.0 (iPad; CPU OS 16_7_10 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+            "Version/16.6 Mobile/15E148 Safari/604.1,gzip(gfe)"
+        ),
+        needs_cookies=True,
+    ),
     InnertubeClient(
         name="WEB",
         version="2.20260114.08.00",
@@ -109,6 +101,38 @@ INNERTUBE_CLIENTS: tuple[InnertubeClient, ...] = (
         ),
         needs_cookies=True,
     ),
+    InnertubeClient(
+        name="TVHTML5",
+        version="7.20260114.12.00",
+        client_id=7,
+        user_agent=(
+            "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/25.lts.30.1034943-gold "
+            "(unlike Gecko), Unknown_TV_Unknown_0/Unknown (Unknown, Unknown)"
+        ),
+        client_extra={"clientFormFactor": "UNKNOWN_FORM_FACTOR"},
+        needs_cookies=True,
+    ),
+    InnertubeClient(
+        name="IOS",
+        version="21.02.3",
+        client_id=5,
+        user_agent=(
+            "com.google.ios.youtube/21.02.3 "
+            "(iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)"
+        ),
+        client_extra={
+            "deviceMake": "Apple",
+            "deviceModel": "iPhone16,2",
+            "osName": "iPhone",
+            "osVersion": "18.3.2.22D82",
+        },
+        needs_cookies=True,
+    ),
+)
+
+INNERTUBE_CLIENTS: tuple[InnertubeClient, ...] = (
+    *ANON_INNERTUBE_CLIENTS,
+    *AUTH_INNERTUBE_CLIENTS,
 )
 
 

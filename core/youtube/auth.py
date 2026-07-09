@@ -130,10 +130,10 @@ class YouTubeSessionAuthManager:
 
     def is_configured(self) -> bool:
         cookies = self.build_cookies()
-        return bool(
-            cookies.get("SID")
-            or cookies.get("__Secure-1PSID")
-            or cookies.get("SAPISID")
+        has_session = bool(cookies.get("SID") or cookies.get("__Secure-1PSID"))
+        has_auth = bool(
+            cookies.get("SAPISID")
             or cookies.get("__Secure-1PAPISID")
-            or len(cookies) >= 2
+            or cookies.get("APISID")
         )
+        return has_session and has_auth

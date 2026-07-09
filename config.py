@@ -112,7 +112,7 @@ class Settings:
             youtube_session_token=os.getenv("YOUTUBE_SESSION_TOKEN", "").strip()
             or os.getenv("YOUTUBE_COOKIES", "").strip(),
             youtube_client_version=os.getenv(
-                "YOUTUBE_CLIENT_VERSION", "2.20240710.00.00"
+                "YOUTUBE_CLIENT_VERSION", "2.20260114.08.00"
             ).strip(),
             request_delay_sec=float(os.getenv("REQUEST_DELAY_SEC", "0.8")),
             max_concurrent_requests=int(os.getenv("MAX_CONCURRENT_REQUESTS", "6")),

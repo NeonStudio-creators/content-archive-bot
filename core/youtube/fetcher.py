@@ -17,6 +17,8 @@ from core.youtube.auth import YouTubeSessionAuthManager
 from core.youtube.hq_meta import _format_url
 from core.youtube.html_extract import extract_player_response
 from core.youtube.innertube_clients import (
+    ANON_INNERTUBE_CLIENTS,
+    AUTH_INNERTUBE_CLIENTS,
     INNERTUBE_CLIENTS,
     InnertubeClient,
     build_client_context,
@@ -82,6 +84,21 @@ class YouTubeFetcher:
         block = data.get("playabilityStatus") or {}
         return str(block.get("reason") or block.get("status") or "no streams")
 
+    @staticmethod
+    def _consent_cookies() -> dict[str, str]:
+        return {"SOCS": "CAI", "CONSENT": "YES+1"}
+
+    @staticmethod
+    def _extract_visitor_id(html: str) -> str:
+        for pattern in (
+            r'"VISITOR_DATA":"([^"]+)"',
+            r'"visitorData":"([^"]+)"',
+        ):
+            match = re.search(pattern, html)
+            if match:
+                return match.group(1)
+        return ""
+
     async def ensure_session(self, *, force: bool = False) -> None:
         if self._bootstrapped and not force:
             return
@@ -90,27 +107,26 @@ class YouTubeFetcher:
         session = await self._get_session()
         try:
             await self.rate_limiter.wait()
-            cookies = self.auth.build_cookies()
-            cookies.setdefault("SOCS", "CAI")
-            cookies.setdefault("CONSENT", "YES+1")
-            headers = self.auth.build_headers(
-                referer=f"{self.settings.youtube_base_url}/"
-            )
-            async with session.get(
+            headers = {
+                "User-Agent": self.settings.user_agent,
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+            }
+            for page_url in (
                 f"{self.settings.youtube_base_url}/",
-                headers=headers,
-                cookies=cookies,
-                allow_redirects=True,
-            ) as resp:
-                html = await resp.text()
-                self.auth.update_runtime_cookies(parse_set_cookies(resp.headers))
-                for pattern in (
-                    r'"VISITOR_DATA":"([^"]+)"',
-                    r'"visitorData":"([^"]+)"',
-                ):
-                    match = re.search(pattern, html)
-                    if match:
-                        self._visitor_id = match.group(1)
+                "https://m.youtube.com/",
+            ):
+                async with session.get(
+                    page_url,
+                    headers=headers,
+                    cookies=self._consent_cookies(),
+                    allow_redirects=True,
+                ) as resp:
+                    html = await resp.text()
+                    self.auth.update_runtime_cookies(parse_set_cookies(resp.headers))
+                    visitor = self._extract_visitor_id(html)
+                    if visitor:
+                        self._visitor_id = visitor
                         break
         except Exception as exc:
             logger.warning("youtube bootstrap failed: %s", exc)
@@ -118,9 +134,9 @@ class YouTubeFetcher:
             self._bootstrapped = True
 
     def _request_cookies(self, *, use_auth: bool) -> dict[str, str]:
-        cookies = self.auth.build_cookies() if use_auth else {}
-        cookies.setdefault("SOCS", "CAI")
-        cookies.setdefault("CONSENT", "YES+1")
+        cookies = dict(self._consent_cookies())
+        if use_auth and self.auth.is_configured():
+            cookies.update(self.auth.build_cookies())
         return cookies
 
     def _api_headers(
@@ -149,11 +165,11 @@ class YouTubeFetcher:
         *,
         referer: str,
         client: InnertubeClient,
+        use_auth: bool = False,
     ) -> dict[str, Any]:
         await self.ensure_session()
-        use_cookies = self.auth.is_configured() and (
-            client.needs_cookies or client.prefer_cookies
-        )
+        if use_auth and not self.auth.is_configured():
+            raise ValueError("YouTube cookies не настроены")
         video_id = str(body.get("videoId") or "")
         payload = {
             "context": build_client_context(
@@ -165,6 +181,11 @@ class YouTubeFetcher:
             **body,
             "contentCheckOk": True,
             "racyCheckOk": True,
+            "playbackContext": {
+                "contentPlaybackContext": {
+                    "html5Preference": "HTML5_PREF_WANTS",
+                },
+            },
         }
 
         url = (
@@ -181,7 +202,7 @@ class YouTubeFetcher:
         async with session.post(
             url,
             headers=headers,
-            cookies=self._request_cookies(use_auth=use_cookies),
+            cookies=self._request_cookies(use_auth=use_auth),
             json=payload,
         ) as resp:
             text = await resp.text()
@@ -205,6 +226,7 @@ class YouTubeFetcher:
         *,
         label: str,
         user_agent: str | None = None,
+        use_auth: bool = False,
     ) -> dict[str, Any] | None:
         await self.ensure_session()
         session = await self._get_session()
@@ -212,7 +234,7 @@ class YouTubeFetcher:
         headers = self.auth.build_headers(referer=page_url)
         if user_agent:
             headers["User-Agent"] = user_agent
-        cookies = self._request_cookies(use_auth=self.auth.is_configured())
+        cookies = self._request_cookies(use_auth=use_auth)
         async with session.get(
             page_url,
             headers=headers,
@@ -221,6 +243,9 @@ class YouTubeFetcher:
         ) as resp:
             html = await resp.text()
             self.auth.update_runtime_cookies(parse_set_cookies(resp.headers))
+            visitor = self._extract_visitor_id(html)
+            if visitor:
+                self._visitor_id = visitor
 
         if self._is_bot_wall(html):
             logger.warning("youtube %s: bot-check page", label)
@@ -240,7 +265,12 @@ class YouTubeFetcher:
             logger.warning("youtube %s: ytInitialPlayerResponse not found", label)
         return None
 
-    async def fetch_player_via_html(self, video_id: str) -> dict[str, Any] | None:
+    async def fetch_player_via_html(
+        self,
+        video_id: str,
+        *,
+        use_auth: bool = False,
+    ) -> dict[str, Any] | None:
         """ytInitialPlayerResponse — m.youtube, watch, shorts."""
         best: dict[str, Any] | None = None
         urls: list[tuple[str, str, str | None]] = [
@@ -263,7 +293,10 @@ class YouTubeFetcher:
         ]
         for page_url, label, ua in urls:
             data = await self._fetch_html_player(
-                page_url, label=label, user_agent=ua
+                page_url,
+                label=label,
+                user_agent=ua,
+                use_auth=use_auth,
             )
             if not data:
                 continue
@@ -286,17 +319,21 @@ class YouTubeFetcher:
         errors: list[str] = []
 
         for client in INNERTUBE_CLIENTS:
-            if client.needs_cookies and not self.auth.is_configured():
+            use_auth = client.needs_cookies
+            if use_auth and not self.auth.is_configured():
                 continue
             client_ref = ref
             if client.embed_url and "{video_id}" in client.embed_url:
                 client_ref = client.embed_url.format(video_id=video_id)
+            elif client.embed_url:
+                client_ref = client.embed_url
             try:
                 data = await self._innertube_post(
                     "player",
                     {"videoId": video_id},
                     referer=client_ref,
                     client=client,
+                    use_auth=use_auth,
                 )
                 if self._player_ok(data):
                     data["_client"] = client.name
@@ -315,12 +352,15 @@ class YouTubeFetcher:
     def _auth_hint(self) -> str:
         if self.auth.is_configured():
             return (
-                " Обновите YOUTUBE_SESSION_TOKEN в Railway "
-                "(свежие cookies с youtube.com в том же браузере)."
+                " Cookies устарели или неполные — обновите YOUTUBE_SESSION_TOKEN: "
+                "откройте youtube.com в Chrome (вы залогинены) → F12 → Application → "
+                "Cookies → скопируйте SID, SAPISID, __Secure-1PSID, __Secure-1PAPISID. "
+                "На Railway без свежих cookies видео часто недоступно."
             )
         return (
             " Добавьте YOUTUBE_SESSION_TOKEN в Railway "
-            "(cookies SID, SAPISID, __Secure-1PSID с youtube.com)."
+            "(SID + SAPISID + __Secure-1PSID + __Secure-1PAPISID с youtube.com). "
+            "С сервера Railway без cookies YouTube обычно блокирует видео."
         )
 
     async def fetch_channel(
@@ -434,33 +474,33 @@ class YouTubeFetcher:
             merged["_client"] = "+".join(dict.fromkeys(clients))
         return merged
 
-    async def fetch_source_player(self, video_id: str) -> dict[str, Any]:
-        """Исходные потоки — HTML + каскад InnerTube-клиентов."""
-        canonical = YouTubeLinkResolver.watch_url(video_id)
-        player: dict[str, Any] | None = None
-        errors: list[str] = []
-
-        html_player = await self.fetch_player_via_html(video_id)
-        if html_player:
-            player = html_player
-        else:
-            errors.append("HTML: нет потоков (bot-check или устаревший парсер)")
-
-        for client in INNERTUBE_CLIENTS:
-            if client.needs_cookies and not self.auth.is_configured():
-                continue
+    async def _innertube_cascade(
+        self,
+        video_id: str,
+        canonical: str,
+        player: dict[str, Any] | None,
+        errors: list[str],
+        *,
+        clients: tuple[InnertubeClient, ...],
+        use_auth: bool,
+        phase: str,
+    ) -> dict[str, Any] | None:
+        for client in clients:
             client_ref = canonical
             if client.embed_url and "{video_id}" in client.embed_url:
                 client_ref = client.embed_url.format(video_id=video_id)
+            elif client.embed_url:
+                client_ref = client.embed_url
             try:
                 data = await self._innertube_post(
                     "player",
                     {"videoId": video_id},
                     referer=client_ref,
                     client=client,
+                    use_auth=use_auth,
                 )
                 if self._player_ok(data):
-                    data["_client"] = client.name
+                    data["_client"] = f"{phase}{client.name}"
                     player = (
                         self._merge_player_data(player, data)
                         if player
@@ -469,28 +509,84 @@ class YouTubeFetcher:
                     if self._stream_url_count(
                         player.get("streamingData")
                     ) >= 3:
-                        break
+                        return player
                 else:
                     errors.append(
-                        f"{client.name}: {self._playability_reason(data)}"
+                        f"{phase}{client.name}: {self._playability_reason(data)}"
                     )
             except Exception as exc:
-                errors.append(f"{client.name}: {exc}")
-                logger.warning("youtube %s: %s", client.name, exc)
+                errors.append(f"{phase}{client.name}: {exc}")
+                logger.warning("youtube %s%s: %s", phase, client.name, exc)
+        return player
 
-        if not player or not self._player_ok(player):
-            hint = self._auth_hint()
-            raise ValueError(
-                "Не удалось получить видео YouTube. "
-                + ("; ".join(errors[:6]) if errors else "нет потоков")
-                + hint
-            )
-
+    def _finalize_player(
+        self,
+        player: dict[str, Any],
+        video_id: str,
+        canonical: str,
+    ) -> dict[str, Any]:
         if not player.get("_source"):
             player["_source"] = player.get("_client", "merged")
         player["_video_id"] = video_id
         player["_canonical_url"] = canonical
         return player
+
+    async def fetch_source_player(self, video_id: str) -> dict[str, Any]:
+        """Исходные потоки — HTML + каскад InnerTube (сначала без cookies)."""
+        canonical = YouTubeLinkResolver.watch_url(video_id)
+        player: dict[str, Any] | None = None
+        errors: list[str] = []
+
+        html_anon = await self.fetch_player_via_html(video_id, use_auth=False)
+        if html_anon:
+            player = html_anon
+        else:
+            errors.append("HTML(anon): bot-check или нет потоков")
+
+        player = await self._innertube_cascade(
+            video_id,
+            canonical,
+            player,
+            errors,
+            clients=ANON_INNERTUBE_CLIENTS,
+            use_auth=False,
+            phase="",
+        )
+
+        if player and self._player_ok(player):
+            return self._finalize_player(player, video_id, canonical)
+
+        if self.auth.is_configured():
+            html_auth = await self.fetch_player_via_html(video_id, use_auth=True)
+            if html_auth:
+                player = (
+                    self._merge_player_data(player, html_auth)
+                    if player
+                    else html_auth
+                )
+            else:
+                errors.append("HTML(auth): bot-check или устаревшие cookies")
+
+            player = await self._innertube_cascade(
+                video_id,
+                canonical,
+                player,
+                errors,
+                clients=AUTH_INNERTUBE_CLIENTS,
+                use_auth=True,
+                phase="auth:",
+            )
+        else:
+            errors.append("Cookies: не заданы")
+
+        if not player or not self._player_ok(player):
+            raise ValueError(
+                "Не удалось получить видео YouTube. "
+                + ("; ".join(errors[:8]) if errors else "нет потоков")
+                + self._auth_hint()
+            )
+
+        return self._finalize_player(player, video_id, canonical)
 
     async def fetch_video(self, url: str, *, video_id: str | None = None) -> dict[str, Any]:
         vid = video_id or YouTubeLinkResolver.extract_video_id(url)
