@@ -1,0 +1,3 @@
+# Node.js нужен yt-dlp для YouTube challenge solver (EJS)
+[phases.setup]
+nixPkgs = ["nodejs_20"]

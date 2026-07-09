@@ -7,18 +7,25 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
 import sys
+import tempfile
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_YTDLP_TIMEOUT_SEC = 90
+_YTDLP_TIMEOUT_SEC = 120
+
+_CLIENT_PRESETS: tuple[str, ...] = (
+    "youtube:player_client=android_vr,web_safari,tv,ios",
+    "youtube:player_client=mweb,web_embedded,android",
+    "youtube:player_client=tv_embedded,web",
+)
 
 
-def _ytdlp_executable() -> list[str]:
-    if shutil.which("yt-dlp"):
-        return ["yt-dlp"]
+def _ytdlp_base() -> list[str]:
     return [sys.executable, "-m", "yt_dlp"]
 
 
@@ -100,32 +107,55 @@ def ytdlp_info_to_player(info: dict[str, Any], *, video_id: str) -> dict[str, An
     }
 
 
-def _cookie_header(cookies: dict[str, str]) -> str:
-    return "; ".join(f"{k}={v}" for k, v in cookies.items() if k and v)
+def _write_netscape_cookies(cookies: dict[str, str]) -> Path:
+    fd, name = tempfile.mkstemp(suffix=".txt", prefix="yt_cookies_")
+    os.close(fd)
+    path = Path(name)
+    lines = [
+        "# Netscape HTTP Cookie File",
+        "# https://curl.haxx.se/rfc/cookie_spec.html",
+        "",
+    ]
+    for name, value in cookies.items():
+        if not name or not value:
+            continue
+        lines.append(
+            f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{name}\t{value}"
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
 
 
-async def fetch_via_ytdlp(
-    video_id: str,
+def _build_cmd(
     page_url: str,
     *,
-    cookies: dict[str, str] | None = None,
-) -> dict[str, Any] | None:
-    cmd = [
-        *_ytdlp_executable(),
+    extractor_args: str,
+    cookies_path: Path | None,
+) -> list[str]:
+    extras: list[str] = []
+    if shutil.which("node"):
+        extras.extend(["--js-runtimes", "node"])
+    if cookies_path:
+        extras.extend(["--cookies", str(cookies_path)])
+    return [
+        *_ytdlp_base(),
+        *extras,
         "-J",
         "--no-warnings",
         "--no-playlist",
         "--socket-timeout",
-        "30",
+        "45",
+        "--retries",
+        "3",
+        "--remote-components",
+        "ejs:github",
         "--extractor-args",
-        "youtube:player_client=android_vr,web,ios,tv_embedded",
+        extractor_args,
         page_url,
     ]
-    if cookies:
-        header = _cookie_header(cookies)
-        if header:
-            cmd[1:1] = ["--add-header", f"Cookie:{header}"]
 
+
+async def _run_ytdlp(cmd: list[str]) -> tuple[dict[str, Any] | None, str]:
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -133,8 +163,7 @@ async def fetch_via_ytdlp(
             stderr=asyncio.subprocess.PIPE,
         )
     except FileNotFoundError:
-        logger.warning("yt-dlp not found")
-        return None
+        return None, "yt-dlp module not found (pip install yt-dlp)"
 
     try:
         stdout, stderr = await asyncio.wait_for(
@@ -143,23 +172,79 @@ async def fetch_via_ytdlp(
         )
     except asyncio.TimeoutError:
         proc.kill()
-        logger.warning("yt-dlp timeout")
-        return None
+        return None, "yt-dlp timeout"
 
+    err = (stderr or b"").decode(errors="replace").strip()
     if proc.returncode != 0:
-        err = (stderr or b"").decode(errors="replace")[:300]
-        logger.warning("yt-dlp exit %s: %s", proc.returncode, err)
-        return None
+        tail = err.splitlines()[-1] if err else f"exit {proc.returncode}"
+        return None, tail[:400]
 
     try:
-        info = json.loads(stdout.decode(errors="replace"))
+        return json.loads(stdout.decode(errors="replace")), ""
     except json.JSONDecodeError as exc:
-        logger.warning("yt-dlp json: %s", exc)
-        return None
+        return None, f"json error: {exc}"
 
-    player = ytdlp_info_to_player(info, video_id=video_id)
-    if not (player.get("streamingData", {}).get("formats") or player.get(
-        "streamingData", {}
-    ).get("adaptiveFormats")):
-        return None
-    return player
+
+async def fetch_via_ytdlp(
+    video_id: str,
+    page_url: str,
+    *,
+    cookies: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
+    last_err = ""
+    cookie_attempts: list[dict[str, str] | None] = [None]
+    if cookies:
+        cookie_attempts.append(cookies)
+
+    for cookie_set in cookie_attempts:
+        cookies_path: Path | None = None
+        try:
+            if cookie_set:
+                cookies_path = _write_netscape_cookies(cookie_set)
+            for preset in _CLIENT_PRESETS:
+                cmd = _build_cmd(
+                    page_url,
+                    extractor_args=preset,
+                    cookies_path=cookies_path,
+                )
+                info, err = await _run_ytdlp(cmd)
+                if err:
+                    last_err = err
+                    logger.warning("yt-dlp (%s): %s", preset, err)
+                    continue
+                if not info:
+                    continue
+                player = ytdlp_info_to_player(info, video_id=video_id)
+                streams = player.get("streamingData") or {}
+                if streams.get("formats") or streams.get("adaptiveFormats"):
+                    logger.info("yt-dlp OK preset=%s cookies=%s", preset, bool(cookie_set))
+                    return player
+                last_err = "no stream URLs in yt-dlp response"
+        finally:
+            if cookies_path and cookies_path.exists():
+                cookies_path.unlink(missing_ok=True)
+
+    if last_err:
+        logger.warning("yt-dlp failed: %s", last_err)
+    return None
+
+
+async def probe_ytdlp() -> tuple[bool, str]:
+    """Проверка доступности yt-dlp на сервере."""
+    cmd = [*_ytdlp_base(), "--version"]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+    except FileNotFoundError:
+        return False, "модуль yt_dlp не установлен"
+    except asyncio.TimeoutError:
+        return False, "timeout"
+    if proc.returncode != 0:
+        return False, (stderr or b"").decode(errors="replace")[:200]
+    ver = (stdout or b"").decode().strip()
+    node = "node OK" if shutil.which("node") else "node MISSING"
+    return True, f"{ver} ({node})"

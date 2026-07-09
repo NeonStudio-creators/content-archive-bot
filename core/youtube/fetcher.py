@@ -27,7 +27,7 @@ from core.youtube.innertube_clients import (
 from core.youtube.resolver import YouTubeLinkResolver
 from core.youtube.mirror_fallback import fetch_via_mirrors
 from core.youtube.session_verify import YouTubeSessionVerify
-from core.youtube.ytdlp_fallback import fetch_via_ytdlp
+from core.youtube.ytdlp_fallback import fetch_via_ytdlp, probe_ytdlp
 from utils.rate_limit import QuietRateLimiter
 
 logger = logging.getLogger(__name__)
@@ -665,14 +665,21 @@ class YouTubeFetcher:
             if self.auth.is_configured()
             else None
         )
-        player = await fetch_via_ytdlp(
-            video_id,
-            canonical,
-            cookies=cookies,
-        )
-        if player and self._player_ok(player):
-            logger.info("youtube fallback: yt-dlp OK")
-            return player
+        for cookie_try in (
+            cookies,
+            None,
+        ) if cookies else (None,):
+            player = await fetch_via_ytdlp(
+                video_id,
+                canonical,
+                cookies=cookie_try,
+            )
+            if player and self._player_ok(player):
+                logger.info(
+                    "youtube fallback: yt-dlp OK (cookies=%s)",
+                    bool(cookie_try),
+                )
+                return player
 
         session = await self._get_session()
         player = await fetch_via_mirrors(session, video_id)
@@ -728,39 +735,58 @@ class YouTubeFetcher:
         await self.bootstrap_auth_session(force=True)
         result.configured = self.auth.is_configured()
         result.cookie_count = len(self.auth.build_cookies())
+        diag = self.auth.cookie_diagnostic()
         if not result.configured:
-            diag = self.auth.cookie_diagnostic()
             if diag["missing"]:
                 result.errors.append(
                     "Не хватает: " + ", ".join(diag["missing"])
                 )
             if diag["env_len"] == 0:
                 result.errors.append("YOUTUBE_SESSION_TOKEN пуст в Railway")
-            return result
+
         result.visitor_ok = bool(self._visitor_id)
-        result.cookie_count = len(self.auth.build_cookies())
         result.session_ok = self.auth.is_configured()
 
-        mweb = next(c for c in AUTH_INNERTUBE_CLIENTS if c.name == "MWEB")
-        try:
-            data = await self._innertube_post(
-                "player",
-                {"videoId": test_video_id},
-                referer=YouTubeLinkResolver.watch_url(test_video_id),
-                client=mweb,
-                use_auth=True,
+        if result.configured:
+            mweb = next(c for c in AUTH_INNERTUBE_CLIENTS if c.name == "MWEB")
+            try:
+                data = await self._innertube_post(
+                    "player",
+                    {"videoId": test_video_id},
+                    referer=YouTubeLinkResolver.watch_url(test_video_id),
+                    client=mweb,
+                    use_auth=True,
+                )
+                if self._player_ok(data):
+                    result.test_streams = self._stream_url_count(
+                        data.get("streamingData")
+                    )
+                    result.client = "MWEB"
+                else:
+                    result.errors.append(
+                        f"MWEB: {self._playability_reason(data)}"
+                    )
+            except Exception as exc:
+                result.errors.append(f"MWEB: {exc}")
+
+        ytdlp_ok, ytdlp_msg = await probe_ytdlp()
+        if ytdlp_ok:
+            ytdlp_player = await fetch_via_ytdlp(
+                test_video_id,
+                YouTubeLinkResolver.watch_url(test_video_id),
+                cookies=self._request_cookies(use_auth=True)
+                if self.auth.is_configured()
+                else None,
             )
-            if self._player_ok(data):
+            if ytdlp_player and self._player_ok(ytdlp_player):
                 result.test_streams = self._stream_url_count(
-                    data.get("streamingData")
+                    ytdlp_player.get("streamingData")
                 )
-                result.client = "MWEB"
+                result.client = "ytdlp"
             else:
-                result.errors.append(
-                    f"MWEB: {self._playability_reason(data)}"
-                )
-        except Exception as exc:
-            result.errors.append(f"MWEB: {exc}")
+                result.errors.append(f"yt-dlp: не получил потоки ({ytdlp_msg})")
+        else:
+            result.errors.append(f"yt-dlp: {ytdlp_msg}")
 
         if not result.test_streams:
             for client in ANON_INNERTUBE_CLIENTS[:2]:
