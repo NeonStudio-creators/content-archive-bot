@@ -22,10 +22,23 @@ def normalize_csrf_token(raw: str) -> str:
     return unquote(token)
 
 
+def _strip_cookie_quotes(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+        return value[1:-1]
+    return value
+
+
 def parse_cookie_string(raw: str) -> dict[str, str]:
     """Парсит строку cookies: 'SID=abc; SAPISID=xyz' или document.cookie."""
     cookies: dict[str, str] = {}
-    text = raw.strip().strip('"').strip("'")
+    text = raw.strip()
+    if not text:
+        return cookies
+    lower = text.lower()
+    if lower.startswith("youtube_session_token="):
+        text = text.split("=", 1)[1].strip()
+    text = text.strip('"').strip("'")
     if not text:
         return cookies
     for part in text.split(";"):
@@ -33,8 +46,8 @@ def parse_cookie_string(raw: str) -> dict[str, str]:
         if not part or "=" not in part:
             continue
         key, value = part.split("=", 1)
-        key = key.strip()
-        value = value.strip()
+        key = _strip_cookie_quotes(key.strip())
+        value = _strip_cookie_quotes(value.strip())
         if key:
             cookies[key] = unquote(value)
     return cookies
