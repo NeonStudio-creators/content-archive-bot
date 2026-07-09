@@ -904,8 +904,12 @@ class TelegramPresenter:
         entity_id: str,
         *,
         platform: Platform = Platform.INSTAGRAM,
+        username: str | None = None,
     ) -> InlineKeyboardMarkup:
-        eid = entity_id[:40]
+        if platform == Platform.TIKTOK and username:
+            eid = f"{entity_id}:{username.lstrip('@')}"[:57]
+        else:
+            eid = entity_id[:57]
         prefix = "t" if platform == Platform.TIKTOK else "p"
         return InlineKeyboardMarkup(
             inline_keyboard=[
@@ -1324,7 +1328,9 @@ class TelegramPresenter:
         entity_id = bundle.metadata.title or bundle.metadata.entity_id or ""
         caption = self.format_publication_hub(bundle)
         keyboard = self.build_publication_hub_keyboard(
-            entity_id, platform=platform
+            entity_id,
+            platform=platform,
+            username=bundle.metadata.username,
         )
         preview = self._pick_preview_media(bundle)
 

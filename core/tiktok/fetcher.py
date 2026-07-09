@@ -87,21 +87,71 @@ class TikTokFetcher:
         finally:
             self._bootstrapped = True
 
-    async def resolve_short_url(self, url: str) -> str:
+    def normalize_video_url(
+        self,
+        url: str,
+        *,
+        video_id: str | None = None,
+        username: str | None = None,
+    ) -> str:
+        """Приводит ссылку к формату, который принимают TikTok API и mirror."""
+        clean = TikTokLinkResolver.clean_url(url)
+        vid = video_id or TikTokLinkResolver.extract_video_id(clean)
+        if vid:
+            path_user_match = re.search(r"/@([^/]+)/video/", clean)
+            user = username or (path_user_match.group(1) if path_user_match else None)
+            if user:
+                return TikTokLinkResolver.video_page_url(vid, user)
+            if "/video/" not in clean and "@" not in clean:
+                return TikTokLinkResolver.video_page_url(vid, prefer_mobile=True)
+        return clean
+
+    async def resolve_short_url(
+        self,
+        url: str,
+        *,
+        video_id: str | None = None,
+        username: str | None = None,
+    ) -> str:
         """Разворачивает vm/vt/t ссылки в канонический URL."""
         parsed = urlparse(url)
-        host = parsed.netloc.lower()
-        if host not in {"vm.tiktok.com", "vt.tiktok.com", "www.tiktok.com", "tiktok.com"}:
-            return TikTokLinkResolver.clean_url(url)
-        if "/@" in parsed.path and "/video/" in parsed.path:
-            return TikTokLinkResolver.clean_url(url)
+        host = parsed.netloc.lower().removeprefix("www.")
+        short_hosts = {"vm.tiktok.com", "vt.tiktok.com", "m.tiktok.com"}
+        tiktok_hosts = short_hosts | {"tiktok.com", "www.tiktok.com"}
 
-        await self.ensure_session()
-        session = await self._get_session()
-        await self.rate_limiter.wait()
-        kw = self._request_kwargs(referer=f"{self.settings.tiktok_base_url}/")
-        async with session.get(url, allow_redirects=True, **kw) as resp:
-            return TikTokLinkResolver.clean_url(str(resp.url))
+        if host not in tiktok_hosts and "tiktok.com" not in host:
+            return self.normalize_video_url(
+                url, video_id=video_id, username=username
+            )
+
+        vid = video_id or TikTokLinkResolver.extract_video_id(url)
+        if "/@" in parsed.path and vid:
+            return self.normalize_video_url(url, video_id=vid, username=username)
+
+        if host in short_hosts or parsed.path.startswith("/t/"):
+            await self.ensure_session()
+            session = await self._get_session()
+            await self.rate_limiter.wait()
+            kw = self._request_kwargs(referer=f"{self.settings.tiktok_base_url}/")
+            async with session.get(url, allow_redirects=True, **kw) as resp:
+                final = TikTokLinkResolver.clean_url(str(resp.url))
+                self.auth.update_runtime_cookies(parse_set_cookies(resp.headers))
+                final_vid = TikTokLinkResolver.extract_video_id(final) or vid
+                if final_vid:
+                    path_user = re.search(r"/@([^/]+)/video/", final)
+                    user = username or (path_user.group(1) if path_user else None)
+                    return self.normalize_video_url(
+                        final,
+                        video_id=final_vid,
+                        username=user,
+                    )
+                if vid:
+                    return TikTokLinkResolver.video_page_url(
+                        vid, username, prefer_mobile=True
+                    )
+                return final
+
+        return self.normalize_video_url(url, video_id=vid, username=username)
 
     @staticmethod
     def _parse_universal(html: str) -> dict[str, Any]:
@@ -222,53 +272,100 @@ class TikTokFetcher:
             return item
         return None
 
-    async def fetch_video_mirror(self, url: str) -> dict[str, Any]:
-        """Fallback без sessionid."""
+    def _mirror_url_candidates(
+        self,
+        url: str,
+        *,
+        video_id: str | None = None,
+        username: str | None = None,
+    ) -> list[str]:
+        vid = video_id or TikTokLinkResolver.extract_video_id(url)
+        candidates: list[str] = []
+        seen: set[str] = set()
+
+        def add(u: str | None) -> None:
+            if not u or u in seen:
+                return
+            seen.add(u)
+            candidates.append(u)
+
+        add(url)
+        if vid:
+            if username:
+                add(TikTokLinkResolver.video_page_url(vid, username))
+            add(TikTokLinkResolver.video_page_url(vid, prefer_mobile=True))
+        return candidates
+
+    async def fetch_video_mirror(
+        self,
+        url: str,
+        *,
+        video_id: str | None = None,
+        username: str | None = None,
+    ) -> dict[str, Any]:
+        """Fallback через mirror API (несколько форматов URL)."""
         await self.ensure_session()
         session = await self._get_session()
-        api_url = f"{TIKWM_API}?url={quote(url, safe='')}&hd=1"
+        candidates = self._mirror_url_candidates(
+            url, video_id=video_id, username=username
+        )
+        errors: list[str] = []
 
-        async def _call() -> dict[str, Any]:
-            await self.rate_limiter.wait()
-            async with session.get(
-                api_url,
-                headers=self.auth.build_headers(accept="application/json"),
-            ) as resp:
-                body = await resp.text()
-                if resp.status >= 400:
-                    raise ValueError(f"Mirror API HTTP {resp.status}")
-                payload = json.loads(body)
-                if payload.get("code") != 0:
-                    msg = payload.get("msg") or "mirror error"
-                    if "limit" in str(msg).lower():
-                        await self.rate_limiter.wait()
-                        raise aiohttp.ClientError(msg)
-                    raise ValueError(f"TikTok mirror: {msg}")
-                data = payload.get("data")
-                if not isinstance(data, dict):
-                    raise ValueError("TikTok mirror: пустой ответ")
-                return data
+        for candidate in candidates:
+            api_url = f"{TIKWM_API}?url={quote(candidate, safe='')}&hd=1"
+            try:
+                await self.rate_limiter.wait()
+                async with session.get(
+                    api_url,
+                    headers=self.auth.build_headers(accept="application/json"),
+                ) as resp:
+                    body = await resp.text()
+                    if resp.status >= 400:
+                        errors.append(f"{candidate}: HTTP {resp.status}")
+                        continue
+                    payload = json.loads(body)
+                    if payload.get("code") != 0:
+                        msg = payload.get("msg") or "mirror error"
+                        if "limit" in str(msg).lower():
+                            await self.rate_limiter.wait()
+                        errors.append(f"{candidate}: {msg}")
+                        continue
+                    data = payload.get("data")
+                    if isinstance(data, dict) and data.get("id"):
+                        return data
+                    errors.append(f"{candidate}: пустой ответ")
+            except json.JSONDecodeError as exc:
+                errors.append(f"{candidate}: JSON {exc}")
+            except aiohttp.ClientError as exc:
+                errors.append(f"{candidate}: {exc}")
 
-        return await with_retry(
-            _call,
-            max_retries=self.settings.max_retries,
-            backoff_sec=self.settings.retry_backoff_sec,
-            label="tiktok_mirror",
+        hint = (
+            " Проверьте TIKTOK_SESSION_TOKEN (sessionid с tiktok.com)."
+            if not self.auth.is_configured()
+            else ""
+        )
+        raise ValueError(
+            "Не удалось получить видео TikTok. "
+            + ("; ".join(errors[:2]) if errors else "mirror недоступен")
+            + hint
         )
 
-    @staticmethod
-    def _extract_item_id(url: str) -> str | None:
-        match = re.search(r"/video/(\d+)", url)
-        return match.group(1) if match else None
-
-    async def fetch_video(self, url: str) -> dict[str, Any]:
-        canonical = await self.resolve_short_url(url)
+    async def fetch_video(
+        self,
+        url: str,
+        *,
+        video_id: str | None = None,
+        username: str | None = None,
+    ) -> dict[str, Any]:
+        canonical = await self.resolve_short_url(
+            url, video_id=video_id, username=username
+        )
         item = await self.fetch_video_via_html(canonical)
         if item:
             item["_source"] = "html"
             return item
 
-        item_id = self._extract_item_id(canonical)
+        item_id = video_id or TikTokLinkResolver.extract_video_id(canonical)
         if item_id:
             api_item = await self.fetch_video_via_api(item_id, canonical)
             if api_item:
@@ -277,7 +374,11 @@ class TikTokFetcher:
 
         if not self.auth.is_configured():
             logger.warning("TIKTOK_SESSION_TOKEN не задан — mirror fallback")
-        data = await self.fetch_video_mirror(canonical)
+        data = await self.fetch_video_mirror(
+            canonical,
+            video_id=item_id,
+            username=username,
+        )
         data["_source"] = "mirror"
         data["_canonical_url"] = canonical
         return data

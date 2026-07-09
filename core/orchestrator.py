@@ -22,6 +22,7 @@ from core.platforms import Platform
 from core.tiktok.audio_meta import extract_audio_sources
 from core.tiktok.auth import TikTokSessionAuthManager
 from core.tiktok.fetcher import TikTokFetcher
+from core.tiktok.resolver import TikTokLinkResolver
 from core.tiktok.hq_meta import build_hq_downloads as build_tiktok_hq, hq_filename as tiktok_hq_filename
 from core.tiktok.parser import TikTokParser
 from core.tiktok.profile_adapter import extract_avatar_from_scope
@@ -29,6 +30,15 @@ from utils.dict_utils import dig, safe_dict
 from utils.rate_limit import QuietRateLimiter
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_tiktok_entity_token(token: str) -> tuple[str, str | None]:
+    """video_id или video_id:username из callback-кнопки."""
+    raw = token.strip()
+    if ":" in raw:
+        video_id, username = raw.split(":", 1)
+        return video_id.strip(), username.strip() or None
+    return raw, None
 
 
 def _media_node_from_response(media_data: dict) -> dict:
@@ -96,14 +106,27 @@ class ArchiveOrchestrator:
 
     async def _tiktok_publication_quick(self, resolved: ResolvedLink) -> ArchiveBundle:
         await self.tiktok_fetcher.ensure_session()
-        canonical = await self.tiktok_fetcher.resolve_short_url(resolved.original_url)
+        ids = resolved.identifiers
+        video_id = ids.get("video_id") or TikTokLinkResolver.extract_video_id(
+            resolved.original_url
+        )
+        username = ids.get("username")
+        canonical = await self.tiktok_fetcher.resolve_short_url(
+            resolved.original_url,
+            video_id=video_id,
+            username=username,
+        )
         resolved = ResolvedLink(
             original_url=canonical,
             entity_type=resolved.entity_type,
-            identifiers=resolved.identifiers,
+            identifiers=ids,
             platform=Platform.TIKTOK,
         )
-        item = await self.tiktok_fetcher.fetch_video(canonical)
+        item = await self.tiktok_fetcher.fetch_video(
+            canonical,
+            video_id=video_id,
+            username=username,
+        )
         return self.tiktok_parser.parse_video_quick(resolved, item)
 
     async def _collect_author_profile(
@@ -444,38 +467,63 @@ class ArchiveOrchestrator:
 
     async def _tiktok_publication_deep(
         self,
-        video_id: str,
+        entity_token: str,
         mode: str,
         *,
         original_url: str | None = None,
     ) -> ArchiveBundle:
         await self.tiktok_fetcher.ensure_session()
-        url = original_url or f"{self.settings.tiktok_base_url}/video/{video_id}"
-        canonical = await self.tiktok_fetcher.resolve_short_url(url)
+        video_id, username = _parse_tiktok_entity_token(entity_token)
+        if not video_id:
+            raise ValueError("Не указан ID видео TikTok")
+
+        url = original_url or TikTokLinkResolver.video_page_url(
+            video_id,
+            username,
+            prefer_mobile=not username,
+        )
+        canonical = await self.tiktok_fetcher.resolve_short_url(
+            url,
+            video_id=video_id,
+            username=username,
+        )
         resolved = ResolvedLink(
             original_url=canonical,
             entity_type=EntityType.PUBLICATION,
-            identifiers={"video_id": video_id},
+            identifiers={
+                "video_id": video_id,
+                **({"username": username} if username else {}),
+            },
             platform=Platform.TIKTOK,
         )
 
         if mode == "prof":
-            item = await self.tiktok_fetcher.fetch_video(canonical)
-            username = (
-                safe_dict(item.get("author")).get("unique_id")
-                or safe_dict(resolved.identifiers).get("username")
+            item = await self.tiktok_fetcher.fetch_video(
+                canonical,
+                video_id=video_id,
+                username=username,
             )
-            if not username:
+            author = safe_dict(item.get("author"))
+            resolved_username = (
+                author.get("unique_id")
+                or username
+                or resolved.identifiers.get("username")
+            )
+            if not resolved_username:
                 raise ValueError("Не удалось определить автора видео")
             profile_resolved = ResolvedLink(
-                original_url=f"{self.settings.tiktok_base_url}/@{username}",
+                original_url=f"{self.settings.tiktok_base_url}/@{resolved_username}",
                 entity_type=EntityType.PROFILE,
-                identifiers={"username": username},
+                identifiers={"username": resolved_username},
                 platform=Platform.TIKTOK,
             )
             return await self._collect_tiktok_profile(profile_resolved)
 
-        item = await self.tiktok_fetcher.fetch_video(canonical)
+        item = await self.tiktok_fetcher.fetch_video(
+            canonical,
+            video_id=video_id,
+            username=username,
+        )
         if mode == "vid":
             return self.tiktok_parser.parse_video_deep(resolved, item)
 

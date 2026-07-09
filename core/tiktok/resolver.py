@@ -139,3 +139,30 @@ class TikTokLinkResolver:
                 )
 
         return None
+
+    @staticmethod
+    def extract_video_id(url: str) -> str | None:
+        for pattern in (
+            r"/video/(\d+)",
+            r"/v/(\d+)",
+            r"/photo/(\d+)",
+        ):
+            match = re.search(pattern, url)
+            if match:
+                return match.group(1)
+        return None
+
+    @classmethod
+    def video_page_url(
+        cls,
+        video_id: str,
+        username: str | None = None,
+        *,
+        prefer_mobile: bool = False,
+    ) -> str:
+        """Канонический URL страницы видео для API и mirror."""
+        vid = str(video_id).strip()
+        user = (username or "").strip().lstrip("@")
+        if user and not prefer_mobile:
+            return f"https://www.tiktok.com/@{user}/video/{vid}"
+        return f"https://m.tiktok.com/v/{vid}.html"
