@@ -42,7 +42,7 @@ class Settings:
     tiktok_csrf_token: str = ""
     youtube_base_url: str = "https://www.youtube.com"
     youtube_session_token: str = ""
-    youtube_client_version: str = "2.20240710.00.00"
+    youtube_client_version: str = "2.20260114.08.00"
 
     # «Тихий» режим — задержки, потоки и лимиты
     request_delay_sec: float = 0.4

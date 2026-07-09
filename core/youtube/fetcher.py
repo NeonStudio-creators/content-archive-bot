@@ -15,6 +15,7 @@ from config import Settings
 from core.session_bootstrap import merge_cookies, parse_set_cookies
 from core.youtube.auth import YouTubeSessionAuthManager
 from core.youtube.hq_meta import _format_url
+from core.youtube.html_extract import extract_player_response
 from core.youtube.innertube_clients import (
     INNERTUBE_CLIENTS,
     InnertubeClient,
@@ -33,13 +34,6 @@ _BOT_MARKERS = (
     "unusual traffic",
     "not a bot",
 )
-
-_PLAYER_RESPONSE_PATTERNS = (
-    r"ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;",
-    r"var ytInitialPlayerResponse\s*=\s*(\{.+?\});",
-    r'"playerResponse":(\{.+?\})\s*,\s*"',
-)
-
 
 @dataclass
 class YouTubeFetcher:
@@ -138,12 +132,14 @@ class YouTubeFetcher:
     ) -> dict[str, str]:
         headers = self.auth.build_headers(referer=referer, for_api=True)
         headers["User-Agent"] = user_agent
+        headers["X-Youtube-Client-Name"] = str(client.client_id)
+        headers["X-Youtube-Client-Version"] = (
+            self.settings.youtube_client_version
+            if client.name == "WEB"
+            else client.version
+        )
         if self._visitor_id:
             headers["X-Goog-Visitor-Id"] = self._visitor_id
-        if client.name == "WEB":
-            headers["X-Youtube-Client-Version"] = (
-                self.settings.youtube_client_version
-            )
         return headers
 
     async def _innertube_post(
@@ -155,7 +151,9 @@ class YouTubeFetcher:
         client: InnertubeClient,
     ) -> dict[str, Any]:
         await self.ensure_session()
-        use_cookies = client.needs_cookies and self.auth.is_configured()
+        use_cookies = self.auth.is_configured() and (
+            client.needs_cookies or client.prefer_cookies
+        )
         video_id = str(body.get("videoId") or "")
         payload = {
             "context": build_client_context(
@@ -228,38 +226,39 @@ class YouTubeFetcher:
             logger.warning("youtube %s: bot-check page", label)
             return None
 
-        for pattern in _PLAYER_RESPONSE_PATTERNS:
-            match = re.search(pattern, html, re.DOTALL)
-            if not match:
-                continue
-            try:
-                data = json.loads(match.group(1))
-            except json.JSONDecodeError:
-                continue
-            if self._player_ok(data):
-                data["_client"] = label
-                return data
+        data = extract_player_response(html)
+        if data and self._player_ok(data):
+            data["_client"] = label
+            return data
+        if data:
+            logger.warning(
+                "youtube %s: player parsed but no streams (%s)",
+                label,
+                self._playability_reason(data),
+            )
+        else:
+            logger.warning("youtube %s: ytInitialPlayerResponse not found", label)
         return None
 
     async def fetch_player_via_html(self, video_id: str) -> dict[str, Any] | None:
         """ytInitialPlayerResponse — m.youtube, watch, shorts."""
         best: dict[str, Any] | None = None
         urls: list[tuple[str, str, str | None]] = [
+            (YouTubeLinkResolver.watch_url(video_id), "html_watch", None),
             (
                 f"https://m.youtube.com/watch?v={video_id}",
                 "html_mweb",
-                self._MOBILE_UA,
-            ),
-            (YouTubeLinkResolver.watch_url(video_id), "html_watch", None),
-            (
-                f"{self.settings.youtube_base_url}/shorts/{video_id}",
-                "html_shorts",
                 self._MOBILE_UA,
             ),
             (
                 f"{self.settings.youtube_base_url}/embed/{video_id}",
                 "html_embed",
                 None,
+            ),
+            (
+                f"{self.settings.youtube_base_url}/shorts/{video_id}",
+                "html_shorts",
+                self._MOBILE_UA,
             ),
         ]
         for page_url, label, ua in urls:
@@ -444,6 +443,8 @@ class YouTubeFetcher:
         html_player = await self.fetch_player_via_html(video_id)
         if html_player:
             player = html_player
+        else:
+            errors.append("HTML: нет потоков (bot-check или устаревший парсер)")
 
         for client in INNERTUBE_CLIENTS:
             if client.needs_cookies and not self.auth.is_configured():
@@ -481,7 +482,7 @@ class YouTubeFetcher:
             hint = self._auth_hint()
             raise ValueError(
                 "Не удалось получить видео YouTube. "
-                + ("; ".join(errors[:4]) if errors else "нет потоков")
+                + ("; ".join(errors[:6]) if errors else "нет потоков")
                 + hint
             )
 
