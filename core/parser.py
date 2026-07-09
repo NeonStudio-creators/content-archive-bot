@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from core.fetcher import ResolvedLink
+from core.hq_meta import build_hq_downloads
 from core.profile_adapter import (
     extract_avatar_from_profile_payload,
     extract_avatar_url,
@@ -215,12 +216,19 @@ def _parse_media_node(node: dict[str, Any]) -> list[MediaAsset]:
     if is_video:
         tech = build_video_technical(node)
         extra.update(tech)
-        if tech.get("width"):
-            width = tech["width"]
-        if tech.get("height"):
-            height = tech["height"]
-        if tech.get("video_url_best"):
+        extra.update(build_hq_downloads(node))
+        if extra.get("hq_best_url"):
+            video_url = extra["hq_best_url"]
+        elif tech.get("video_url_best"):
             video_url = tech["video_url_best"]
+        if extra.get("width") or tech.get("width"):
+            width = extra.get("width") or tech["width"]
+        if extra.get("height") or tech.get("height"):
+            height = extra.get("height") or tech["height"]
+    elif url:
+        extra.update(build_hq_downloads(node))
+        if extra.get("hq_best_url"):
+            url = extra["hq_best_url"]
 
     assets.append(
         MediaAsset(

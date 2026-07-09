@@ -7,14 +7,23 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from typing import Any
 
 from config import Settings
 from core.audio_meta import extract_audio_sources, url_from_audio_block
+from core.hq_meta import build_hq_downloads, hq_filename, iter_video_nodes
 from core.profile_adapter import extract_avatar_from_profile_payload
 from core.auth import SessionAuthManager
-from core.fetcher import GraphQLFetcher, LinkResolver, ResolvedLink
+from core.fetcher import GraphQLFetcher, ResolvedLink
+from core.link_resolver import LinkResolver
 from core.models import ActivityRecord, ArchiveBundle, EntityType, MediaAsset
 from core.parser import EntityDeepCollector, _parse_story_item
+from core.platforms import Platform
+from core.tiktok.audio_meta import extract_audio_sources
+from core.tiktok.fetcher import TikTokFetcher
+from core.tiktok.hq_meta import build_hq_downloads as build_tiktok_hq, hq_filename as tiktok_hq_filename
+from core.tiktok.parser import TikTokParser
+from core.tiktok.profile_adapter import extract_avatar_from_scope
 from utils.dict_utils import dig, safe_dict
 from utils.rate_limit import QuietRateLimiter
 
@@ -52,16 +61,22 @@ class ArchiveOrchestrator:
             settings.max_concurrent_requests,
         )
         self.fetcher = GraphQLFetcher(settings, self.auth, self.rate_limiter)
+        self.tiktok_fetcher = TikTokFetcher(settings, self.rate_limiter)
         self.parser = EntityDeepCollector()
+        self.tiktok_parser = TikTokParser()
 
     async def close(self) -> None:
         await self.fetcher.close()
+        await self.tiktok_fetcher.close()
 
     async def process_publication_quick(self, url: str) -> ArchiveBundle:
         """Быстрый сбор публикации — только медиа и описание, без комментариев."""
         resolved = LinkResolver.resolve(url)
         if resolved is None or resolved.entity_type != EntityType.PUBLICATION:
             raise ValueError(f"Не удалось распознать публикацию: {url}")
+
+        if resolved.platform == Platform.TIKTOK:
+            return await self._tiktok_publication_quick(resolved)
 
         if not self.auth.is_configured():
             raise RuntimeError("SESSION_TOKEN не настроен")
@@ -74,6 +89,18 @@ class ArchiveOrchestrator:
             original_url=resolved.original_url,
         )
         return self.parser.parse_publication(resolved, media_data)
+
+    async def _tiktok_publication_quick(self, resolved: ResolvedLink) -> ArchiveBundle:
+        await self.tiktok_fetcher.ensure_session()
+        canonical = await self.tiktok_fetcher.resolve_short_url(resolved.original_url)
+        resolved = ResolvedLink(
+            original_url=canonical,
+            entity_type=resolved.entity_type,
+            identifiers=resolved.identifiers,
+            platform=Platform.TIKTOK,
+        )
+        item = await self.tiktok_fetcher.fetch_video(canonical)
+        return self.tiktok_parser.parse_video_quick(resolved, item)
 
     async def _collect_author_profile(
         self,
@@ -110,8 +137,16 @@ class ArchiveOrchestrator:
         mode: str,
         *,
         original_url: str | None = None,
+        platform: Platform = Platform.INSTAGRAM,
     ) -> ArchiveBundle:
         """Глубокий сбор по кнопке: prof | aud | vid | hq."""
+        if platform == Platform.TIKTOK:
+            return await self._tiktok_publication_deep(
+                shortcode,
+                mode,
+                original_url=original_url,
+            )
+
         if not self.auth.is_configured():
             raise RuntimeError("SESSION_TOKEN не настроен")
 
@@ -141,7 +176,106 @@ class ArchiveOrchestrator:
             await self._resolve_publication_audio(
                 bundle, _media_node_from_response(media_data)
             )
+        elif mode == "hq":
+            await self._resolve_publication_hq(
+                bundle, _media_node_from_response(media_data)
+            )
         return bundle
+
+    async def _resolve_publication_hq(
+        self,
+        bundle: ArchiveBundle,
+        media_node: dict,
+    ) -> None:
+        """Обогащает медиа ссылками максимального качества."""
+        nodes = iter_video_nodes(media_node)
+        targets = [
+            a
+            for a in bundle.media
+            if a.media_type in ("video", "image") and a.url
+        ]
+
+        if not nodes:
+            nodes = [media_node]
+
+        for asset, node in zip(targets, nodes):
+            hq = build_hq_downloads(node)
+            asset.extra.update(hq)
+            best_url = hq.get("hq_best_url")
+            if best_url:
+                asset.url = best_url
+            best = hq.get("hq_best") or {}
+            if best.get("width"):
+                asset.width = best["width"]
+            if best.get("height"):
+                asset.height = best["height"]
+
+        if len(targets) > len(nodes):
+            for asset in targets[len(nodes):]:
+                hq = build_hq_downloads(media_node)
+                asset.extra.update(hq)
+
+    async def download_publication_hq(
+        self,
+        bundle: ArchiveBundle,
+        *,
+        platform: Platform = Platform.INSTAGRAM,
+    ) -> tuple[bytes, str, dict[str, Any]]:
+        """Скачивает файл максимального качества для отправки в Telegram."""
+        if platform == Platform.TIKTOK:
+            return await self._download_tiktok_hq(bundle)
+
+        candidates_assets = [
+            a
+            for a in bundle.media
+            if a.media_type == "video"
+            or (a.media_type == "image" and a.url)
+        ]
+        if not candidates_assets:
+            raise ValueError("Нет медиа для загрузки в максимальном качестве")
+
+        asset = candidates_assets[0]
+        extra = asset.extra
+        entries: list[dict[str, Any]] = list(extra.get("hq_downloads") or [])
+        if not entries and extra.get("hq_best"):
+            entries = [extra["hq_best"]]
+        if not entries:
+            fallback = extra.get("video_url_best") or asset.url
+            if fallback:
+                entries = [{"url": fallback, "source": "fallback"}]
+
+        if not entries:
+            raise ValueError("Ссылки максимального качества недоступны")
+
+        base = (
+            bundle.metadata.title
+            or bundle.metadata.username
+            or "media"
+        )
+        errors: list[str] = []
+
+        for idx, entry in enumerate(entries[:6]):
+            url = entry.get("url")
+            if not url:
+                continue
+            try:
+                data, size = await self.fetcher.download_media_bytes(
+                    url,
+                    referer=bundle.source_url,
+                    label="hq_download",
+                )
+                filename = hq_filename(base, entry, index=idx + 1)
+                return data, filename, {**entry, "size_bytes": size}
+            except ValueError:
+                raise
+            except Exception as exc:
+                errors.append(f"{entry.get('source')}: {exc}")
+                logger.warning("HQ download %s: %s", entry.get("source"), exc)
+
+        raise ValueError(
+            "Не удалось скачать файл. "
+            + ("; ".join(errors[:3]) if errors else "")
+        )
 
     async def _resolve_publication_audio(
         self,
@@ -196,10 +330,60 @@ class ArchiveOrchestrator:
 
         video.extra.update(audio_info)
 
-    async def download_publication_audio(
+    async def _download_tiktok_hq(
         self, bundle: ArchiveBundle
+    ) -> tuple[bytes, str, dict[str, Any]]:
+        video = next((a for a in bundle.media if a.media_type == "video"), None)
+        if not video:
+            raise ValueError("Нет видео для загрузки")
+
+        entries: list[dict[str, Any]] = list(video.extra.get("hq_downloads") or [])
+        if not entries and video.extra.get("hq_best"):
+            entries = [video.extra["hq_best"]]
+        if not entries and video.url:
+            entries = [{"url": video.url, "source": "fallback"}]
+        if not entries:
+            raise ValueError("Ссылки максимального качества недоступны")
+
+        base = (
+            bundle.metadata.description
+            or bundle.metadata.username
+            or "tiktok"
+        )
+        errors: list[str] = []
+        for idx, entry in enumerate(entries[:6]):
+            url = entry.get("url")
+            if not url:
+                continue
+            try:
+                data, size = await self.tiktok_fetcher.download_media_bytes(
+                    url,
+                    referer=bundle.source_url,
+                    label="tiktok_hq",
+                )
+                filename = tiktok_hq_filename(base, entry, index=idx + 1)
+                return data, filename, {**entry, "size_bytes": size}
+            except ValueError:
+                raise
+            except Exception as exc:
+                errors.append(f"{entry.get('source')}: {exc}")
+                logger.warning("TikTok HQ %s: %s", entry.get("source"), exc)
+
+        raise ValueError(
+            "Не удалось скачать файл. "
+            + ("; ".join(errors[:3]) if errors else "")
+        )
+
+    async def download_publication_audio(
+        self,
+        bundle: ArchiveBundle,
+        *,
+        platform: Platform = Platform.INSTAGRAM,
     ) -> tuple[bytes, str]:
         """Скачивает оригинальный аудиофайл публикации."""
+        if platform == Platform.TIKTOK:
+            return await self._download_tiktok_audio(bundle)
+
         video = next(
             (a for a in bundle.media if a.media_type == "video"), None
         )
@@ -232,11 +416,152 @@ class ArchiveOrchestrator:
         filename = f"{safe_base or 'audio'}.{fmt}"
         return data, filename
 
+    async def _download_tiktok_audio(
+        self, bundle: ArchiveBundle
+    ) -> tuple[bytes, str]:
+        video = next((a for a in bundle.media if a.media_type == "video"), None)
+        if not video:
+            raise ValueError("В видео нет аудиодорожки")
+
+        url = video.extra.get("audio_url")
+        if not url:
+            raise ValueError("Оригинальный аудиофайл недоступен")
+
+        data = await self.tiktok_fetcher.download_bytes(
+            url,
+            referer=bundle.source_url,
+            label="tiktok_audio",
+        )
+        music = video.extra.get("music") or {}
+        base = music.get("title") or bundle.metadata.username or "audio"
+        safe_base = re.sub(r"[^\w\-.]+", "_", str(base)).strip("_")[:40]
+        fmt = video.extra.get("audio_format") or "mp3"
+        return data, f"{safe_base or 'audio'}.{fmt}"
+
+    async def _tiktok_publication_deep(
+        self,
+        video_id: str,
+        mode: str,
+        *,
+        original_url: str | None = None,
+    ) -> ArchiveBundle:
+        await self.tiktok_fetcher.ensure_session()
+        url = original_url or f"{self.settings.tiktok_base_url}/video/{video_id}"
+        canonical = await self.tiktok_fetcher.resolve_short_url(url)
+        resolved = ResolvedLink(
+            original_url=canonical,
+            entity_type=EntityType.PUBLICATION,
+            identifiers={"video_id": video_id},
+            platform=Platform.TIKTOK,
+        )
+
+        if mode == "prof":
+            item = await self.tiktok_fetcher.fetch_video(canonical)
+            username = (
+                safe_dict(item.get("author")).get("unique_id")
+                or safe_dict(resolved.identifiers).get("username")
+            )
+            if not username:
+                raise ValueError("Не удалось определить автора видео")
+            profile_resolved = ResolvedLink(
+                original_url=f"{self.settings.tiktok_base_url}/@{username}",
+                entity_type=EntityType.PROFILE,
+                identifiers={"username": username},
+                platform=Platform.TIKTOK,
+            )
+            return await self._collect_tiktok_profile(profile_resolved)
+
+        item = await self.tiktok_fetcher.fetch_video(canonical)
+        if mode == "vid":
+            return self.tiktok_parser.parse_video_deep(resolved, item)
+
+        bundle = self.tiktok_parser.parse_video_quick(resolved, item)
+        if mode == "aud":
+            await self._resolve_tiktok_audio(bundle, item)
+        elif mode == "hq":
+            await self._resolve_tiktok_hq(bundle, item)
+        return bundle
+
+    async def _resolve_tiktok_hq(
+        self,
+        bundle: ArchiveBundle,
+        item: dict[str, Any],
+    ) -> None:
+        video = next((a for a in bundle.media if a.media_type == "video"), None)
+        if not video:
+            return
+        hq = build_tiktok_hq(item)
+        video.extra.update(hq)
+        best_url = hq.get("hq_best_url")
+        if best_url:
+            video.url = best_url
+        best = hq.get("hq_best") or {}
+        if best.get("width"):
+            video.width = best["width"]
+        if best.get("height"):
+            video.height = best["height"]
+
+    async def _resolve_tiktok_audio(
+        self,
+        bundle: ArchiveBundle,
+        item: dict[str, Any],
+    ) -> None:
+        video = next((a for a in bundle.media if a.media_type == "video"), None)
+        if not video:
+            return
+        video.extra.update(extract_audio_sources(item))
+
+    async def download_tiktok_hq(
+        self, bundle: ArchiveBundle
+    ) -> tuple[bytes, str, dict[str, Any]]:
+        return await self.download_publication_hq(bundle, platform=Platform.TIKTOK)
+
+    async def download_tiktok_audio(
+        self, bundle: ArchiveBundle
+    ) -> tuple[bytes, str]:
+        return await self.download_publication_audio(bundle, platform=Platform.TIKTOK)
+
+    async def _collect_tiktok_profile(self, resolved: ResolvedLink) -> ArchiveBundle:
+        username = resolved.identifiers["username"]
+        payload = await self.tiktok_fetcher.fetch_profile_html(username)
+        bundle = self.tiktok_parser.parse_profile(resolved, payload)
+        await self._ensure_tiktok_profile_avatar(bundle, payload)
+        return bundle
+
+    async def _ensure_tiktok_profile_avatar(
+        self,
+        bundle: ArchiveBundle,
+        profile_data: dict[str, Any] | None = None,
+    ) -> None:
+        if bundle.resolved_type != EntityType.PROFILE:
+            return
+
+        url = bundle.metadata.avatar_url
+        if not url and profile_data:
+            scope = profile_data.get("scope") or {}
+            url = extract_avatar_from_scope(scope)
+        if not url:
+            for raw in bundle.raw_graphql or []:
+                scope = raw.get("scope") or {}
+                url = extract_avatar_from_scope(scope)
+                if url:
+                    break
+        if url:
+            self._upsert_avatar_media(bundle, url)
+
     async def process_url(self, url: str) -> ArchiveBundle:
         """Полный пайплайн обработки одной ссылки."""
         resolved = LinkResolver.resolve(url)
         if resolved is None:
             raise ValueError(f"Не удалось распознать ссылку: {url}")
+
+        if resolved.platform == Platform.TIKTOK:
+            if resolved.entity_type == EntityType.PROFILE:
+                await self.tiktok_fetcher.ensure_session()
+                return await self._collect_tiktok_profile(resolved)
+            if resolved.entity_type == EntityType.PUBLICATION:
+                return await self._tiktok_publication_quick(resolved)
+            raise ValueError(f"TikTok: тип {resolved.entity_type} не поддерживается")
 
         if not self.auth.is_configured():
             raise RuntimeError("SESSION_TOKEN не настроен")

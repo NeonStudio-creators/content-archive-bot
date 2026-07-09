@@ -18,6 +18,7 @@ from aiogram.types import (
 )
 
 from core.models import ArchiveBundle, EntityType, MediaAsset
+from core.platforms import Platform
 from core.profile_adapter import (
     extract_avatar_from_profile_payload,
     extract_avatar_url,
@@ -44,7 +45,7 @@ class TelegramPresenter:
     """Минималистичное оформление отчётов для Telegram."""
 
     BRAND = "ContentExplorer"
-    VERSION = "1.3.5"
+    VERSION = "1.4.0"
 
     PUB_MODES = {
         "prof": "Профиль автора",
@@ -87,10 +88,27 @@ class TelegramPresenter:
         self,
         settings: Settings,
         fetcher: GraphQLFetcher | None = None,
+        tiktok_fetcher: object | None = None,
     ) -> None:
         self.settings = settings
         self.fetcher = fetcher
+        self.tiktok_fetcher = tiktok_fetcher
         self._ig_base = settings.platform_base_url.rstrip("/")
+        self._tt_base = settings.tiktok_base_url.rstrip("/")
+
+    def _bundle_platform(self, bundle: ArchiveBundle) -> Platform:
+        if bundle.metadata.raw_fields.get("platform") == "tiktok":
+            return Platform.TIKTOK
+        if "tiktok.com" in (bundle.source_url or "").lower():
+            return Platform.TIKTOK
+        return Platform.INSTAGRAM
+
+    def _base_url(self, bundle: ArchiveBundle) -> str:
+        return (
+            self._tt_base
+            if self._bundle_platform(bundle) == Platform.TIKTOK
+            else self._ig_base
+        )
 
     @staticmethod
     def _kv(key: str, value: str) -> str:
@@ -116,21 +134,36 @@ class TelegramPresenter:
     def _footer(self) -> str:
         return f"\n<i>{self.BRAND} · v{self.VERSION}</i>"
 
-    def _profile_url(self, username: str) -> str:
-        return f"{self._ig_base}/{username.strip('/')}/"
+    def _profile_url(
+        self, username: str, *, platform: Platform = Platform.INSTAGRAM
+    ) -> str:
+        base = self._tt_base if platform == Platform.TIKTOK else self._ig_base
+        user = username.strip("/").lstrip("@")
+        if platform == Platform.TIKTOK:
+            return f"{base}/@{user}"
+        return f"{base}/{user}/"
 
-    def _profile_link(self, username: str | None, label: str | None = None) -> str:
+    def _profile_link(
+        self,
+        username: str | None,
+        label: str | None = None,
+        *,
+        platform: Platform = Platform.INSTAGRAM,
+    ) -> str:
         if not username:
             return "—"
         text = label or f"@{username}"
         return (
-            f'<a href="{th.href(self._profile_url(username))}">{th.esc(text)}</a>'
+            f'<a href="{th.href(self._profile_url(username, platform=platform))}">'
+            f"{th.esc(text)}</a>"
         )
 
-    def _actor_link(self, username: str | None) -> str:
+    def _actor_link(
+        self, username: str | None, *, platform: Platform = Platform.INSTAGRAM
+    ) -> str:
         if not username:
             return "—"
-        return self._profile_link(username, f"@{username}")
+        return self._profile_link(username, f"@{username}", platform=platform)
 
     @staticmethod
     def _format_bitrate(bps: int | float | None) -> str:
@@ -142,6 +175,7 @@ class TelegramPresenter:
     def _build_keyboard(self, bundle: ArchiveBundle) -> InlineKeyboardMarkup | None:
         buttons: list[InlineKeyboardButton] = []
         m = bundle.metadata
+        platform = self._bundle_platform(bundle)
 
         if m.username:
             label = (
@@ -152,7 +186,7 @@ class TelegramPresenter:
             buttons.append(
                 InlineKeyboardButton(
                     text=label,
-                    url=self._profile_url(m.username),
+                    url=self._profile_url(m.username, platform=platform),
                 )
             )
         if bundle.source_url and bundle.resolved_type != EntityType.PROFILE:
@@ -866,29 +900,33 @@ class TelegramPresenter:
         return th.truncate_html("".join(parts), TG_MAX_LENGTH)
 
     def build_publication_hub_keyboard(
-        self, shortcode: str
+        self,
+        entity_id: str,
+        *,
+        platform: Platform = Platform.INSTAGRAM,
     ) -> InlineKeyboardMarkup:
-        sc = shortcode[:40]
+        eid = entity_id[:40]
+        prefix = "t" if platform == Platform.TIKTOK else "p"
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
                         text="Профиль",
-                        callback_data=f"p:prof:{sc}",
+                        callback_data=f"{prefix}:prof:{eid}",
                     ),
                     InlineKeyboardButton(
                         text="Звук",
-                        callback_data=f"p:aud:{sc}",
+                        callback_data=f"{prefix}:aud:{eid}",
                     ),
                 ],
                 [
                     InlineKeyboardButton(
                         text="Видео полностью",
-                        callback_data=f"p:vid:{sc}",
+                        callback_data=f"{prefix}:vid:{eid}",
                     ),
                     InlineKeyboardButton(
                         text="HD загрузка",
-                        callback_data=f"p:hq:{sc}",
+                        callback_data=f"{prefix}:hq:{eid}",
                     ),
                 ],
             ]
@@ -896,6 +934,7 @@ class TelegramPresenter:
 
     def format_publication_hub(self, bundle: ArchiveBundle) -> str:
         m = bundle.metadata
+        platform = self._bundle_platform(bundle)
         parts: list[str] = [
             f"<b>{self.BRAND}</b>\n",
             f"{th.esc(self.TYPE_LABEL[EntityType.PUBLICATION])}\n",
@@ -903,7 +942,11 @@ class TelegramPresenter:
 
         if m.username:
             parts.append(
-                self._kv("Автор", self._profile_link(m.username)) + "\n"
+                self._kv(
+                    "Автор",
+                    self._profile_link(m.username, platform=platform),
+                )
+                + "\n"
             )
 
         stat_bits: list[str] = []
@@ -1115,14 +1158,42 @@ class TelegramPresenter:
         parts.append(self._footer())
         return th.truncate_html("".join(parts), TG_MAX_LENGTH)
 
-    def format_deep_hq(self, bundle: ArchiveBundle) -> str:
+    def _format_hq_entry_line(self, entry: dict) -> str:
+        parts: list[str] = []
+        w, h = entry.get("width"), entry.get("height")
+        if w and h:
+            parts.append(f"{w}×{h}")
+        if entry.get("fps"):
+            parts.append(f"{entry['fps']} fps")
+        if entry.get("codec"):
+            parts.append(str(entry["codec"])[:20])
+        if entry.get("bandwidth_bps"):
+            parts.append(self._format_bitrate(entry["bandwidth_bps"]))
+        src = entry.get("source")
+        if src:
+            parts.append(th.esc(str(src)))
+        return " · ".join(parts) if parts else "вариант"
+
+    def format_deep_hq(
+        self,
+        bundle: ArchiveBundle,
+        *,
+        delivered: dict | None = None,
+        notice: str | None = None,
+    ) -> str:
         parts: list[str] = [
             f"<b>{self.BRAND}</b>\n",
             f"<b>{th.esc(self.PUB_MODES['hq'])}</b>\n",
         ]
 
+        if notice:
+            parts.append(
+                f"<blockquote>{th.esc(notice)}</blockquote>\n"
+            )
+
         media_list = [
-            a for a in bundle.media
+            a
+            for a in bundle.media
             if a.url and a.url.startswith("http")
         ]
         if not media_list:
@@ -1137,8 +1208,13 @@ class TelegramPresenter:
             kind = "видео" if asset.media_type == "video" else "фото"
             parts.append(self._section(f"Файл #{idx} · {kind}"))
 
-            e = asset.extra if asset.media_type == "video" else {}
-            best_url = e.get("video_url_best") or asset.url
+            e = asset.extra
+            best = e.get("hq_best") or {}
+            best_url = (
+                e.get("hq_best_url")
+                or e.get("video_url_best")
+                or asset.url
+            )
             res = e.get("resolution") or (
                 f"{asset.width}×{asset.height}"
                 if asset.width and asset.height
@@ -1146,68 +1222,80 @@ class TelegramPresenter:
             )
 
             if res:
-                parts.append(self._kv("Лучшее", f"<b>{th.esc(str(res))}</b>") + "\n")
+                parts.append(
+                    self._kv("Максимум", f"<b>{th.esc(str(res))}</b>") + "\n"
+                )
+            if best.get("source"):
+                parts.append(
+                    self._kv(
+                        "Источник",
+                        f"<code>{th.esc(str(best['source']))}</code>",
+                    )
+                    + "\n"
+                )
+            if delivered and idx == 1:
+                size = delivered.get("size_bytes")
+                if size:
+                    parts.append(
+                        self._kv(
+                            "Размер файла",
+                            f"<b>{size / (1024 * 1024):.2f} МБ</b>",
+                        )
+                        + "\n"
+                    )
+            if asset.duration_sec:
+                parts.append(
+                    self._kv(
+                        "Длительность",
+                        f"<b>{asset.duration_sec:.1f} с</b>",
+                    )
+                    + "\n"
+                )
+
             parts.append(
                 self._kv(
                     "Скачать",
-                    f'<a href="{th.href(best_url)}">максимальное качество</a>',
+                    f'<a href="{th.href(best_url)}">лучшее качество</a>',
                 )
                 + "\n"
             )
 
-            variants = sorted(
-                e.get("quality_variants") or [],
-                key=lambda v: (v.get("width") or 0) * (v.get("height") or 0),
-                reverse=True,
-            )
-            if variants:
-                parts.append(self._kv("Варианты", f"<b>{len(variants)}</b>") + "\n")
-                for v in variants[:8]:
-                    w, h = v.get("width"), v.get("height")
-                    url = v.get("url")
+            downloads = list(e.get("hq_downloads") or [])
+            if not downloads:
+                downloads = list(e.get("quality_variants") or [])
+
+            if downloads:
+                parts.append(
+                    self._kv("Все варианты", f"<b>{len(downloads)}</b>") + "\n"
+                )
+                for entry in downloads[:10]:
+                    url = entry.get("url")
                     if not url:
                         continue
-                    label = f"{w}×{h}" if w and h else "вариант"
+                    label = self._format_hq_entry_line(entry)
                     parts.append(
                         f'  <a href="{th.href(url)}">{th.esc(label)}</a>\n'
                     )
-                if len(variants) > 8:
-                    parts.append(f"  +{len(variants) - 8} ещё\n")
+                if len(downloads) > 10:
+                    parts.append(f"  +{len(downloads) - 10} ещё\n")
 
-            dash_reps = sorted(
-                e.get("dash_representations") or [],
-                key=lambda r: (r.get("width") or 0) * (r.get("height") or 0),
-                reverse=True,
-            )
+            dash_reps = [
+                r
+                for r in (e.get("dash_representations") or [])
+                if r.get("url")
+            ]
             if dash_reps:
-                parts.append(self._kv("DASH", f"<b>{len(dash_reps)}</b>") + "\n")
-                for rep in dash_reps[:5]:
-                    w, h = rep.get("width"), rep.get("height")
-                    rfps = rep.get("fps")
-                    codec = rep.get("codec")
-                    bw = rep.get("bandwidth_bps")
-                    label_parts = []
-                    if w and h:
-                        label_parts.append(f"{w}×{h}")
-                    if rfps:
-                        label_parts.append(f"{rfps} fps")
-                    if codec:
-                        label_parts.append(str(codec)[:18])
-                    if bw:
-                        label_parts.append(self._format_bitrate(bw))
-                    if label_parts:
-                        parts.append(
-                            f"  {' · '.join(label_parts)}\n"
-                        )
-
-            if asset.media_type != "video":
                 parts.append(
-                    self._kv(
-                        "Фото",
-                        f'<a href="{th.href(asset.url)}">оригинал</a>',
-                    )
-                    + "\n"
+                    self._kv("DASH URL", f"<b>{len(dash_reps)}</b>") + "\n"
                 )
+                for rep in dash_reps[:4]:
+                    url = rep.get("url")
+                    if not url:
+                        continue
+                    label = self._format_hq_entry_line(rep)
+                    parts.append(
+                        f'  <a href="{th.href(url)}">{th.esc(label)}</a>\n'
+                    )
 
         parts.append(self._footer())
         return th.truncate_html("".join(parts), TG_MAX_LENGTH)
@@ -1230,10 +1318,14 @@ class TelegramPresenter:
         bot: Bot,
         message: Message,
         bundle: ArchiveBundle,
+        *,
+        platform: Platform = Platform.INSTAGRAM,
     ) -> None:
-        shortcode = bundle.metadata.title or ""
+        entity_id = bundle.metadata.title or bundle.metadata.entity_id or ""
         caption = self.format_publication_hub(bundle)
-        keyboard = self.build_publication_hub_keyboard(shortcode)
+        keyboard = self.build_publication_hub_keyboard(
+            entity_id, platform=platform
+        )
         preview = self._pick_preview_media(bundle)
 
         sent = False
@@ -1320,18 +1412,56 @@ class TelegramPresenter:
             parse_mode="HTML",
         )
 
+    async def send_hq_report(
+        self,
+        message: Message,
+        bundle: ArchiveBundle,
+        file_bytes: bytes,
+        filename: str,
+        *,
+        delivered: dict | None = None,
+    ) -> None:
+        caption = self.format_deep_hq(
+            bundle, delivered=delivered, notice=None
+        )
+        safe_caption = th.truncate_html(caption, TG_CAPTION_MAX)
+        doc = BufferedInputFile(file_bytes, filename=filename)
+        video = next(
+            (a for a in bundle.media if a.media_type == "video"), None
+        )
+        try:
+            if video and filename.lower().endswith((".mp4", ".mov", ".webm")):
+                await message.answer_video(
+                    video=doc,
+                    caption=safe_caption,
+                    parse_mode="HTML",
+                )
+                return
+        except TelegramBadRequest as exc:
+            logger.warning("HQ video send failed: %s", exc)
+        await message.answer_document(
+            doc,
+            caption=safe_caption,
+            parse_mode="HTML",
+        )
+
     async def send_deep_report(
         self,
         bot: Bot,
         message: Message,
         bundle: ArchiveBundle,
         mode: str,
+        *,
+        notice: str | None = None,
     ) -> None:
         if mode in ("vid", "prof"):
             await self.send_archive(bot, message, bundle)
             return
 
-        report = self.format_deep_report(bundle, mode)
+        if mode == "hq" and notice:
+            report = self.format_deep_hq(bundle, notice=notice)
+        else:
+            report = self.format_deep_report(bundle, mode)
         keyboard = self._build_keyboard(bundle)
         await self._send_html(message, report, keyboard)
 
@@ -1369,12 +1499,20 @@ class TelegramPresenter:
         if not preview:
             return False
 
-        referer = self._profile_url(bundle.metadata.username or "")
+        platform = self._bundle_platform(bundle)
+        referer = self._profile_url(
+            bundle.metadata.username or "", platform=platform
+        )
         photo_bytes: bytes | None = None
         square_side: int | None = None
-        if self.fetcher:
+        downloader = (
+            getattr(self, "tiktok_fetcher", None)
+            if platform == Platform.TIKTOK
+            else self.fetcher
+        )
+        if downloader:
             try:
-                raw = await self.fetcher.download_image_bytes(
+                raw = await downloader.download_image_bytes(
                     preview.url,
                     referer=referer,
                     label="avatar_download",
@@ -1485,10 +1623,16 @@ class TelegramPresenter:
             parse_mode="HTML",
         )
 
-    async def send_processing(self, message: Message, url: str) -> Message:
+    async def send_processing(
+        self,
+        message: Message,
+        url: str,
+        *,
+        platform: str = "Instagram",
+    ) -> Message:
         return await message.answer(
             f"<b>{self.BRAND}</b>\n\n"
-            f"Собираю данные…\n"
+            f"Собираю данные ({platform})…\n"
             f"<blockquote><code>{th.esc(url)}</code></blockquote>",
             parse_mode="HTML",
         )

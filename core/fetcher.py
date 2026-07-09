@@ -36,6 +36,7 @@ from core.session_bootstrap import (
     parse_tokens_from_html,
 )
 from core.models import EntityType
+from core.platforms import Platform
 from utils.concurrency import first_success
 from utils.dict_utils import dig, safe_dict
 from utils.instagram_id import shortcode_to_media_id
@@ -127,6 +128,7 @@ class ResolvedLink:
     original_url: str
     entity_type: EntityType
     identifiers: dict[str, str]
+    platform: Platform = Platform.INSTAGRAM
 
 
 class LinkResolver:
@@ -417,11 +419,108 @@ class GraphQLFetcher:
         *,
         referer: str | None = None,
         label: str = "download",
+        max_bytes: int = 48 * 1024 * 1024,
     ) -> bytes:
-        """Скачивает бинарный файл по прямой ссылке."""
-        return await self.download_image_bytes(
-            url, referer=referer, label=label
+        """Скачивает медиафайл (видео/аудио) по прямой ссылке."""
+        data, _ = await self.download_media_bytes(
+            url,
+            referer=referer,
+            label=label,
+            max_bytes=max_bytes,
         )
+        return data
+
+    async def download_media_bytes(
+        self,
+        url: str,
+        *,
+        referer: str | None = None,
+        label: str = "media_download",
+        max_bytes: int = 48 * 1024 * 1024,
+    ) -> tuple[bytes, int]:
+        """Скачивает бинарный файл с лимитом размера (для Telegram)."""
+        await self.rate_limiter.wait()
+        session = await self._get_session()
+        ref = referer or f"{self.settings.platform_base_url}/"
+
+        attempts: list[tuple[dict[str, str], dict[str, str] | None]] = [
+            (
+                {
+                    "User-Agent": self.settings.user_agent,
+                    "Accept": "*/*",
+                    "Referer": ref,
+                },
+                None,
+            ),
+            (
+                self.auth.build_headers(referer=ref, api_type="web"),
+                self.auth.build_cookies(),
+            ),
+            (
+                self.auth.build_headers(referer=ref, api_type="mobile"),
+                self.auth.build_cookies(),
+            ),
+        ]
+
+        last_error: Exception | None = None
+        for headers, cookies in attempts:
+            try:
+                async with session.get(
+                    url,
+                    headers=headers,
+                    cookies=cookies,
+                    allow_redirects=True,
+                ) as resp:
+                    if resp.status >= 400:
+                        body = await resp.text()
+                        logger.warning(
+                            "%s: HTTP %s — %s",
+                            label,
+                            resp.status,
+                            body[:120],
+                        )
+                        continue
+
+                    cl_header = resp.headers.get("Content-Length")
+                    if cl_header:
+                        cl = int(cl_header)
+                        if cl > max_bytes:
+                            mb = cl / (1024 * 1024)
+                            raise ValueError(
+                                f"Файл слишком большой ({mb:.1f} МБ). "
+                                f"Лимит Telegram — {max_bytes // (1024 * 1024)} МБ. "
+                                "Скачайте по ссылке из отчёта."
+                            )
+
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in resp.content.iter_chunked(262_144):
+                        total += len(chunk)
+                        if total > max_bytes:
+                            mb = total / (1024 * 1024)
+                            raise ValueError(
+                                f"Файл слишком большой (>{mb:.1f} МБ). "
+                                "Скачайте по ссылке из отчёта."
+                            )
+                        chunks.append(chunk)
+
+                    data = b"".join(chunks)
+                    if len(data) < 256:
+                        logger.warning("%s: слишком маленький ответ", label)
+                        continue
+                    if data[:1] == b"<":
+                        logger.warning("%s: ответ похож на HTML", label)
+                        continue
+                    return data, total
+            except ValueError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                logger.warning("%s attempt failed: %s", label, exc)
+
+        if last_error:
+            raise last_error
+        raise ValueError(f"Не удалось скачать файл: {url[:80]}")
 
     @staticmethod
     def _looks_like_image(data: bytes) -> bool:

@@ -76,6 +76,12 @@ def parse_dash_manifest(manifest: str | None) -> dict[str, Any]:
         h = int(rep.get("height") or 0)
         bw = int(rep.get("bandwidth") or 0) or None
         codec = rep.get("codecs") or rep.get("mimeType")
+        base = rep.find("mpd:BaseURL", ns) or rep.find("BaseURL")
+        url = None
+        if base is not None and base.text:
+            url = base.text.strip()
+            if url.startswith("//"):
+                url = f"https:{url}"
         entry = {
             "width": w or None,
             "height": h or None,
@@ -83,6 +89,7 @@ def parse_dash_manifest(manifest: str | None) -> dict[str, Any]:
             "bandwidth_bps": bw,
             "codec": codec,
             "id": rep.get("id"),
+            "url": url,
         }
         result["representations"].append(entry)
         if fps and not result["fps"]:

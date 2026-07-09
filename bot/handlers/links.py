@@ -9,8 +9,9 @@ import logging
 from aiogram import Router
 from aiogram.types import Message
 
-from core.fetcher import LinkResolver
+from core.link_resolver import LinkResolver
 from core.models import EntityType
+from core.platforms import Platform
 from core.orchestrator import ArchiveOrchestrator
 from presenter.telegram_presenter import TelegramPresenter
 
@@ -43,22 +44,30 @@ def setup_link_handler(
                 )
                 continue
 
+            platform_label = (
+                "TikTok" if resolved.platform == Platform.TIKTOK else "Instagram"
+            )
             if resolved.entity_type == EntityType.PUBLICATION:
                 status_msg = await message.answer(
                     f"<b>{presenter.BRAND}</b>\n\n"
-                    f"Загружаю публикацию…\n"
+                    f"Загружаю публикацию ({platform_label})…\n"
                     f"<blockquote><code>{url}</code></blockquote>",
                     parse_mode="HTML",
                 )
             else:
-                status_msg = await presenter.send_processing(message, url)
+                status_msg = await presenter.send_processing(
+                    message, url, platform=platform_label
+                )
 
             try:
                 clean = LinkResolver.clean_url(url)
                 if resolved.entity_type == EntityType.PUBLICATION:
                     bundle = await orchestrator.process_publication_quick(clean)
                     await presenter.send_publication_hub(
-                        message.bot, message, bundle
+                        message.bot,
+                        message,
+                        bundle,
+                        platform=resolved.platform,
                     )
                 else:
                     bundle = await orchestrator.process_url(clean)
@@ -73,7 +82,14 @@ def setup_link_handler(
             except Exception as exc:
                 logger.exception("Ошибка обработки %s", url)
                 err = str(exc)
-                if "400" in err and "Bad Request" in err:
+                if resolved.platform == Platform.TIKTOK:
+                    if "WAF" in err or "mirror" in err.lower():
+                        err = (
+                            f"{err} "
+                            "Для TikTok добавьте TIKTOK_COOKIE в Railway "
+                            "(cookies из браузера на tiktok.com)."
+                        )
+                elif "400" in err and "Bad Request" in err:
                     err = (
                         "Instagram отклонил запрос (400). "
                         "Проверьте /session — нужны свежие sessionid и csrftoken "

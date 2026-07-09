@@ -14,25 +14,27 @@ router = Router(name="commands")
 
 START_TEXT = """
 <b>ContentExplorer</b>
-Архиватор контента Instagram
+Архиватор контента Instagram и TikTok
 
 <b>Возможности</b>
 ───────────────
 Ссылка · мгновенный анализ публикации или профиля
 Превью · видео или фото в начале сообщения
-Кнопки · Автор и Видео под медиа
+Кнопки · Профиль, Звук, Видео полностью, HD загрузка
 Статистика · просмотры, лайки, комментарии
-Качество · разрешение, FPS, битрейт, кодек
 Архив · полный JSON вторым сообщением
 
-<b>Поддерживаемые ссылки</b>
+<b>Instagram</b>
 ───────────────
 Профиль · <code>instagram.com/username</code>
-  аватар сверху · посты, reels, отметки · быстрый сбор
 Пост · <code>instagram.com/p/…</code>
 Reels · <code>instagram.com/reel/…</code>
-Сторис · <code>instagram.com/stories/user/id</code>
-Актуальное · <code>instagram.com/stories/highlights/id</code>
+
+<b>TikTok</b>
+───────────────
+Видео · <code>tiktok.com/@user/video/…</code>
+Профиль · <code>tiktok.com/@user</code>
+Короткие · <code>vm.tiktok.com/…</code>
 
 Просто отправьте ссылку — команды не нужны.
 """
@@ -62,6 +64,7 @@ HELP_TEXT = """
 <code>TELEGRAM_BOT_TOKEN</code>
 <code>SESSION_TOKEN</code>
 <code>CSRF_TOKEN</code> — обязателен (cookie csrftoken)
+<code>TIKTOK_COOKIE</code> — опционально (cookies tiktok.com)
 """
 
 
