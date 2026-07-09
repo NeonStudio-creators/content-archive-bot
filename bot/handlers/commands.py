@@ -64,7 +64,8 @@ HELP_TEXT = """
 <code>TELEGRAM_BOT_TOKEN</code>
 <code>SESSION_TOKEN</code>
 <code>CSRF_TOKEN</code> — обязателен (cookie csrftoken)
-<code>TIKTOK_COOKIE</code> — опционально (cookies tiktok.com)
+<code>TIKTOK_SESSION_TOKEN</code> — sessionid с tiktok.com
+<code>TIKTOK_CSRF_TOKEN</code> — tt_csrf_token (опционально)
 """
 
 
@@ -73,11 +74,17 @@ def setup_commands(orchestrator: ArchiveOrchestrator) -> Router:
     async def cmd_session(message: Message) -> None:
         await orchestrator.fetcher.ensure_session()
         csrf = orchestrator.auth.get_csrf_token()
+        tt_csrf = orchestrator.tiktok_auth.get_csrf_token()
         lines = [
             "<b>ContentExplorer</b> · Проверка сессии",
             "",
+            "<b>Instagram</b>",
             f"SESSION_TOKEN · {'OK' if orchestrator.auth.session_id else 'нет'}",
             f"CSRF_TOKEN · {'OK' if csrf else 'нет — добавьте в Railway'}",
+            "",
+            "<b>TikTok</b>",
+            f"TIKTOK_SESSION_TOKEN · {'OK' if orchestrator.tiktok_auth.session_id else 'нет'}",
+            f"TIKTOK_CSRF_TOKEN · {'OK' if tt_csrf else 'опционально'}",
         ]
         try:
             data = await orchestrator.fetcher._fetch_profile_via_web_api(

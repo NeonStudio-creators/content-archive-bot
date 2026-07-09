@@ -1,5 +1,5 @@
 """
-Сетевой слой TikTok: HTML-профили и mirror API для видео.
+Сетевой слой TikTok: sessionid + HTML/API, mirror как fallback.
 """
 
 from __future__ import annotations
@@ -9,11 +9,13 @@ import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 import aiohttp
 
 from config import Settings
+from core.session_bootstrap import merge_cookies, parse_set_cookies
+from core.tiktok.auth import TikTokSessionAuthManager
 from core.tiktok.resolver import TikTokLinkResolver
 from utils.rate_limit import QuietRateLimiter
 from utils.retry import with_retry
@@ -26,6 +28,7 @@ TIKWM_API = "https://www.tikwm.com/api/"
 @dataclass
 class TikTokFetcher:
     settings: Settings
+    auth: TikTokSessionAuthManager
     rate_limiter: QuietRateLimiter
     _session: aiohttp.ClientSession | None = field(default=None, init=False)
     _bootstrapped: bool = field(default=False, init=False)
@@ -36,26 +39,25 @@ class TikTokFetcher:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            jar = aiohttp.CookieJar()
             timeout = aiohttp.ClientTimeout(total=60, connect=15)
-            self._session = aiohttp.ClientSession(
-                cookie_jar=jar,
-                timeout=timeout,
-            )
+            self._session = aiohttp.ClientSession(timeout=timeout)
         return self._session
 
-    def _headers(self, *, referer: str | None = None, accept: str | None = None) -> dict[str, str]:
-        headers = {
-            "User-Agent": self.settings.user_agent,
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept": accept or "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+    def _request_kwargs(
+        self,
+        *,
+        referer: str | None = None,
+        accept: str | None = None,
+        for_api: bool = False,
+    ) -> dict[str, Any]:
+        return {
+            "headers": self.auth.build_headers(
+                referer=referer,
+                accept=accept,
+                for_api=for_api,
+            ),
+            "cookies": self.auth.build_cookies(),
         }
-        if referer:
-            headers["Referer"] = referer
-        cookie = self.settings.tiktok_cookie.strip()
-        if cookie:
-            headers["Cookie"] = cookie
-        return headers
 
     async def ensure_session(self) -> None:
         if self._bootstrapped:
@@ -63,13 +65,23 @@ class TikTokFetcher:
         session = await self._get_session()
         try:
             await self.rate_limiter.wait()
+            kw = self._request_kwargs()
             async with session.get(
                 f"{self.settings.tiktok_base_url}/",
-                headers=self._headers(),
                 allow_redirects=True,
+                **kw,
             ) as resp:
                 await resp.text()
-            logger.info("tiktok bootstrap: status=%s", resp.status)
+                merged = merge_cookies(
+                    parse_set_cookies(resp.headers),
+                    self.auth.build_cookies(),
+                )
+                self.auth.update_runtime_cookies(merged)
+            logger.info(
+                "tiktok bootstrap: sessionid=%s, cookies=%s",
+                "OK" if self.auth.is_configured() else "MISSING",
+                list(self.auth.build_cookies().keys()),
+            )
         except Exception as exc:
             logger.warning("tiktok bootstrap failed: %s", exc)
         finally:
@@ -84,15 +96,12 @@ class TikTokFetcher:
         if "/@" in parsed.path and "/video/" in parsed.path:
             return TikTokLinkResolver.clean_url(url)
 
+        await self.ensure_session()
         session = await self._get_session()
         await self.rate_limiter.wait()
-        async with session.get(
-            url,
-            headers=self._headers(referer=f"{self.settings.tiktok_base_url}/"),
-            allow_redirects=True,
-        ) as resp:
-            final = str(resp.url)
-            return TikTokLinkResolver.clean_url(final)
+        kw = self._request_kwargs(referer=f"{self.settings.tiktok_base_url}/")
+        async with session.get(url, allow_redirects=True, **kw) as resp:
+            return TikTokLinkResolver.clean_url(str(resp.url))
 
     @staticmethod
     def _parse_universal(html: str) -> dict[str, Any]:
@@ -116,18 +125,16 @@ class TikTokFetcher:
 
         async def _load() -> dict[str, Any]:
             await self.rate_limiter.wait()
-            async with session.get(
-                referer,
-                headers=self._headers(referer=f"{self.settings.tiktok_base_url}/"),
-                allow_redirects=True,
-            ) as resp:
+            kw = self._request_kwargs(referer=f"{self.settings.tiktok_base_url}/")
+            async with session.get(referer, allow_redirects=True, **kw) as resp:
                 html = await resp.text()
+                self.auth.update_runtime_cookies(parse_set_cookies(resp.headers))
                 if resp.status >= 400:
                     raise ValueError(f"TikTok HTTP {resp.status}")
                 if len(html) < 5000 and "__UNIVERSAL_DATA_FOR_REHYDRATION__" not in html:
                     raise ValueError(
                         f"Профиль @{username} недоступен (WAF). "
-                        "Добавьте TIKTOK_COOKIE из браузера."
+                        "Добавьте TIKTOK_SESSION_TOKEN (cookie sessionid с tiktok.com)."
                     )
                 scope = self._parse_universal(html)
                 if not scope.get("webapp.user-detail"):
@@ -145,12 +152,10 @@ class TikTokFetcher:
         await self.ensure_session()
         session = await self._get_session()
         await self.rate_limiter.wait()
-        async with session.get(
-            url,
-            headers=self._headers(referer=f"{self.settings.tiktok_base_url}/"),
-            allow_redirects=True,
-        ) as resp:
+        kw = self._request_kwargs(referer=f"{self.settings.tiktok_base_url}/")
+        async with session.get(url, allow_redirects=True, **kw) as resp:
             html = await resp.text()
+            self.auth.update_runtime_cookies(parse_set_cookies(resp.headers))
         if "__UNIVERSAL_DATA_FOR_REHYDRATION__" not in html:
             return None
         scope = self._parse_universal(html)
@@ -160,8 +165,65 @@ class TikTokFetcher:
             return item
         return None
 
+    def _api_base_params(self) -> dict[str, str]:
+        cookies = self.auth.build_cookies()
+        ms = cookies.get("msToken", "")
+        return {
+            "aid": "1988",
+            "app_language": "en",
+            "app_name": "tiktok_web",
+            "browser_language": "en-US",
+            "browser_name": "Mozilla",
+            "browser_online": "true",
+            "browser_platform": "Win32",
+            "browser_version": self.settings.user_agent,
+            "channel": "tiktok_web",
+            "cookie_enabled": "true",
+            "device_platform": "web_pc",
+            "focus_state": "true",
+            "from_page": "video",
+            "is_fullscreen": "false",
+            "is_page_visible": "true",
+            "language": "en",
+            "os": "windows",
+            "priority_region": "",
+            "referer": "",
+            "region": "US",
+            "screen_height": "1080",
+            "screen_width": "1920",
+            "tz_name": "UTC",
+            "webcast_language": "en",
+            "msToken": ms,
+        }
+
+    async def fetch_video_via_api(self, item_id: str, referer: str) -> dict[str, Any] | None:
+        if not self.auth.is_configured():
+            return None
+        await self.ensure_session()
+        params = {**self._api_base_params(), "itemId": str(item_id)}
+        api_url = (
+            f"{self.settings.tiktok_base_url}/api/item/detail/?"
+            f"{urlencode(params, quote_via=quote)}"
+        )
+        session = await self._get_session()
+        await self.rate_limiter.wait()
+        kw = self._request_kwargs(referer=referer, for_api=True)
+        async with session.get(api_url, **kw) as resp:
+            body = await resp.text()
+            self.auth.update_runtime_cookies(parse_set_cookies(resp.headers))
+        if not body or not body.strip():
+            return None
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            return None
+        item = (payload.get("itemInfo") or {}).get("itemStruct")
+        if isinstance(item, dict) and item.get("id"):
+            return item
+        return None
+
     async def fetch_video_mirror(self, url: str) -> dict[str, Any]:
-        """Основной источник метаданных видео (tikwm)."""
+        """Fallback без sessionid."""
         await self.ensure_session()
         session = await self._get_session()
         api_url = f"{TIKWM_API}?url={quote(url, safe='')}&hd=1"
@@ -170,7 +232,7 @@ class TikTokFetcher:
             await self.rate_limiter.wait()
             async with session.get(
                 api_url,
-                headers=self._headers(accept="application/json"),
+                headers=self.auth.build_headers(accept="application/json"),
             ) as resp:
                 body = await resp.text()
                 if resp.status >= 400:
@@ -194,12 +256,27 @@ class TikTokFetcher:
             label="tiktok_mirror",
         )
 
+    @staticmethod
+    def _extract_item_id(url: str) -> str | None:
+        match = re.search(r"/video/(\d+)", url)
+        return match.group(1) if match else None
+
     async def fetch_video(self, url: str) -> dict[str, Any]:
         canonical = await self.resolve_short_url(url)
         item = await self.fetch_video_via_html(canonical)
         if item:
             item["_source"] = "html"
             return item
+
+        item_id = self._extract_item_id(canonical)
+        if item_id:
+            api_item = await self.fetch_video_via_api(item_id, canonical)
+            if api_item:
+                api_item["_source"] = "api"
+                return api_item
+
+        if not self.auth.is_configured():
+            logger.warning("TIKTOK_SESSION_TOKEN не задан — mirror fallback")
         data = await self.fetch_video_mirror(canonical)
         data["_source"] = "mirror"
         data["_canonical_url"] = canonical
@@ -232,12 +309,9 @@ class TikTokFetcher:
         await self.rate_limiter.wait()
         session = await self._get_session()
         ref = referer or f"{self.settings.tiktok_base_url}/"
+        kw = self._request_kwargs(referer=ref, accept="*/*")
 
-        async with session.get(
-            url,
-            headers=self._headers(referer=ref, accept="*/*"),
-            allow_redirects=True,
-        ) as resp:
+        async with session.get(url, allow_redirects=True, **kw) as resp:
             if resp.status >= 400:
                 raise ValueError(f"Скачивание HTTP {resp.status}")
 

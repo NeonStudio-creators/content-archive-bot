@@ -20,6 +20,7 @@ from core.models import ActivityRecord, ArchiveBundle, EntityType, MediaAsset
 from core.parser import EntityDeepCollector, _parse_story_item
 from core.platforms import Platform
 from core.tiktok.audio_meta import extract_audio_sources
+from core.tiktok.auth import TikTokSessionAuthManager
 from core.tiktok.fetcher import TikTokFetcher
 from core.tiktok.hq_meta import build_hq_downloads as build_tiktok_hq, hq_filename as tiktok_hq_filename
 from core.tiktok.parser import TikTokParser
@@ -61,7 +62,10 @@ class ArchiveOrchestrator:
             settings.max_concurrent_requests,
         )
         self.fetcher = GraphQLFetcher(settings, self.auth, self.rate_limiter)
-        self.tiktok_fetcher = TikTokFetcher(settings, self.rate_limiter)
+        self.tiktok_auth = TikTokSessionAuthManager(settings)
+        self.tiktok_fetcher = TikTokFetcher(
+            settings, self.tiktok_auth, self.rate_limiter
+        )
         self.parser = EntityDeepCollector()
         self.tiktok_parser = TikTokParser()
 

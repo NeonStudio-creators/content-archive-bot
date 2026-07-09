@@ -38,7 +38,8 @@ class Settings:
     platform_base_url: str = "https://www.instagram.com"
     graphql_endpoint: str = "https://www.instagram.com/api/graphql"
     tiktok_base_url: str = "https://www.tiktok.com"
-    tiktok_cookie: str = ""
+    tiktok_session_token: str = ""
+    tiktok_csrf_token: str = ""
 
     # «Тихий» режим — задержки, потоки и лимиты
     request_delay_sec: float = 0.4
@@ -86,7 +87,14 @@ class Settings:
             tiktok_base_url=os.getenv(
                 "TIKTOK_BASE_URL", "https://www.tiktok.com"
             ).rstrip("/"),
-            tiktok_cookie=os.getenv("TIKTOK_COOKIE", "").strip(),
+            tiktok_session_token=normalize_session_token(
+                os.getenv("TIKTOK_SESSION_TOKEN", "").strip()
+                or os.getenv("TIKTOK_SESSIONID", "").strip()
+            ),
+            tiktok_csrf_token=normalize_csrf_token(
+                os.getenv("TIKTOK_CSRF_TOKEN", "").strip()
+                or os.getenv("TIKTOK_CSRF", "").strip()
+            ),
             request_delay_sec=float(os.getenv("REQUEST_DELAY_SEC", "0.8")),
             max_concurrent_requests=int(os.getenv("MAX_CONCURRENT_REQUESTS", "6")),
             max_retries=int(os.getenv("MAX_RETRIES", "3")),
@@ -117,7 +125,13 @@ def log_config_status() -> None:
 
     log = logging.getLogger("content-explorer")
     required = ("TELEGRAM_BOT_TOKEN", "SESSION_TOKEN")
-    optional = ("CSRF_TOKEN", "TIKTOK_COOKIE", "REQUEST_DELAY_SEC", "MAX_RETRIES")
+    optional = (
+        "CSRF_TOKEN",
+        "TIKTOK_SESSION_TOKEN",
+        "TIKTOK_CSRF_TOKEN",
+        "REQUEST_DELAY_SEC",
+        "MAX_RETRIES",
+    )
 
     for name in required:
         status = "OK" if os.getenv(name, "").strip() else "MISSING"

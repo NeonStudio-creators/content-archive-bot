@@ -83,11 +83,11 @@ def setup_link_handler(
                 logger.exception("Ошибка обработки %s", url)
                 err = str(exc)
                 if resolved.platform == Platform.TIKTOK:
-                    if "WAF" in err or "mirror" in err.lower():
+                    if "WAF" in err or "mirror" in err.lower() or "SESSION" in err:
                         err = (
                             f"{err} "
-                            "Для TikTok добавьте TIKTOK_COOKIE в Railway "
-                            "(cookies из браузера на tiktok.com)."
+                            "Добавьте TIKTOK_SESSION_TOKEN в Railway "
+                            "(cookie sessionid с tiktok.com, как SESSION_TOKEN для IG)."
                         )
                 elif "400" in err and "Bad Request" in err:
                     err = (

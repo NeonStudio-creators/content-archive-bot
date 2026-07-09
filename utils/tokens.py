@@ -14,8 +14,11 @@ def normalize_session_token(raw: str) -> str:
 
 def normalize_csrf_token(raw: str) -> str:
     token = raw.strip().strip('"').strip("'")
-    if token.lower().startswith("csrftoken="):
-        token = token.split("=", 1)[1].split(";")[0].strip()
+    lower = token.lower()
+    for prefix in ("csrftoken=", "tt_csrf_token="):
+        if lower.startswith(prefix):
+            token = token.split("=", 1)[1].split(";")[0].strip()
+            break
     return unquote(token)
 
 
