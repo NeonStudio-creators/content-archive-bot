@@ -30,8 +30,16 @@ class YouTubeSessionAuthManager:
         self._runtime_cookies.update({k: v for k, v in cookies.items() if v})
 
     def build_cookies(self) -> dict[str, str]:
-        cookies = dict(self._configured_cookies())
-        cookies.update(self._runtime_cookies)
+        from utils.tokens import _is_valid_cookie_key, _normalize_cookie_key
+
+        cookies: dict[str, str] = {}
+        for key, value in {
+            **self._configured_cookies(),
+            **self._runtime_cookies,
+        }.items():
+            norm = _normalize_cookie_key(key)
+            if _is_valid_cookie_key(norm) and value:
+                cookies[norm] = value
         return cookies
 
     def _sapisid(self, cookies: dict[str, str]) -> str:
