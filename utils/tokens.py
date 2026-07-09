@@ -16,6 +16,16 @@ _COOKIE_KEY_FIXES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r'__Secure-"3PSID', re.I), "__Secure-3PSID"),
 )
 
+# Railway/копипаст без дефиса в имени cookie.
+_COOKIE_KEY_ALIASES: dict[str, str] = {
+    "__Secure1PSID": "__Secure-1PSID",
+    "__Secure1PAPISID": "__Secure-1PAPISID",
+    "__Secure3PSID": "__Secure-3PSID",
+    "__Secure3PAPISID": "__Secure-3PAPISID",
+    "Secure1PSID": "__Secure-1PSID",
+    "Secure1PAPISID": "__Secure-1PAPISID",
+}
+
 
 def normalize_session_token(raw: str) -> str:
     token = raw.strip().strip('"').strip("'")
@@ -45,6 +55,10 @@ def _normalize_cookie_key(key: str) -> str:
     """Убирает кавычки внутри имени cookie и типичные опечатки."""
     key = _strip_cookie_quotes(key.strip())
     key = key.replace('"', "").replace("'", "")
+    alias = _COOKIE_KEY_ALIASES.get(key)
+    if alias:
+        logger.warning("cookie key fixed: %s → %s", key, alias)
+        return alias
     for pattern, replacement in _COOKIE_KEY_FIXES:
         if pattern.search(key):
             fixed = pattern.sub(replacement, key)
@@ -98,6 +112,8 @@ _YOUTUBE_ENV_KEYS: tuple[tuple[str, str], ...] = (
     ("SAPISID", "YOUTUBE_SAPISID"),
     ("__Secure-1PSID", "YOUTUBE_SECURE_1PSID"),
     ("__Secure-1PAPISID", "YOUTUBE_SECURE_1PAPISID"),
+    ("__Secure-1PSID", "YOUTUBE_SECURE1PSID"),
+    ("__Secure-1PAPISID", "YOUTUBE_SECURE1PAPISID"),
     ("__Secure-3PSID", "YOUTUBE_SECURE_3PSID"),
     ("__Secure-3PAPISID", "YOUTUBE_SECURE_3PAPISID"),
     ("LOGIN_INFO", "YOUTUBE_LOGIN_INFO"),
