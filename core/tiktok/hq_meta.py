@@ -35,6 +35,22 @@ def _entry(
     }
 
 
+def _bitrate_play_url(variant: dict[str, Any]) -> str | None:
+    play_addr = safe_dict(variant).get("PlayAddr") or safe_dict(variant).get(
+        "play_addr"
+    )
+    if isinstance(play_addr, str):
+        return play_addr
+    if isinstance(play_addr, dict):
+        url_list = play_addr.get("UrlList") or play_addr.get("url_list") or []
+        if url_list:
+            return url_list[0]
+        uri = play_addr.get("Uri") or play_addr.get("uri")
+        if isinstance(uri, str) and uri.startswith("http"):
+            return uri
+    return None
+
+
 def build_hq_downloads(item: dict[str, Any]) -> dict[str, Any]:
     """Собирает play / hdplay / wmplay в единый список HQ-вариантов."""
     entries: list[dict[str, Any]] = []
@@ -44,41 +60,46 @@ def build_hq_downloads(item: dict[str, Any]) -> dict[str, Any]:
     width = video.get("width") or item.get("width")
     height = video.get("height") or item.get("height")
 
+    bitrate_variants = sorted(
+        item.get("bitrateInfo") or video.get("bitrateInfo") or [],
+        key=lambda v: int(
+            safe_dict(v).get("Bitrate")
+            or safe_dict(v).get("bitrate")
+            or safe_dict(v).get("DataSize")
+            or safe_dict(v).get("data_size")
+            or 0
+        ),
+        reverse=True,
+    )
+    for idx, variant in enumerate(bitrate_variants):
+        v = safe_dict(variant)
+        url = _bitrate_play_url(v)
+        tag = "source" if idx == 0 else "bitrate"
+        entry = _entry(
+            url,
+            source=tag,
+            width=v.get("Width") or v.get("width") or width,
+            height=v.get("Height") or v.get("height") or height,
+            size_bytes=v.get("DataSize") or v.get("data_size"),
+        )
+        if entry and entry["url"] not in seen:
+            seen.add(entry["url"])
+            entries.append(entry)
+
     candidates = [
         ("hdplay", item.get("hdplay"), item.get("hd_size"), "source"),
         ("downloadAddr", video.get("downloadAddr"), None, "download"),
+        ("playAddr", video.get("playAddr"), None, "play_addr"),
         ("play", item.get("play"), item.get("size"), "compressed"),
         ("wmplay", item.get("wmplay"), item.get("wm_size"), "watermark"),
-        ("playAddr", video.get("playAddr"), None, "play_addr"),
     ]
-    for source, url, size, tag in candidates:
+    for _name, url, size, tag in candidates:
         entry = _entry(
             url,
             source=tag,
             width=width,
             height=height,
             size_bytes=size,
-        )
-        if entry and entry["url"] not in seen:
-            seen.add(entry["url"])
-            entries.append(entry)
-
-    for variant in item.get("bitrateInfo") or video.get("bitrateInfo") or []:
-        play_addr = safe_dict(variant).get("PlayAddr") or safe_dict(variant).get(
-            "play_addr"
-        )
-        url = None
-        if isinstance(play_addr, str):
-            url = play_addr
-        elif isinstance(play_addr, dict):
-            url_list = play_addr.get("UrlList") or play_addr.get("url_list") or []
-            url = url_list[0] if url_list else play_addr.get("Uri")
-        entry = _entry(
-            url,
-            source="source",
-            width=variant.get("Width") or variant.get("width"),
-            height=variant.get("Height") or variant.get("height"),
-            size_bytes=variant.get("DataSize") or variant.get("data_size"),
         )
         if entry and entry["url"] not in seen:
             seen.add(entry["url"])

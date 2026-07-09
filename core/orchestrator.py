@@ -24,7 +24,7 @@ from core.tiktok.auth import TikTokSessionAuthManager
 from core.tiktok.fetcher import TikTokFetcher
 from core.tiktok.resolver import TikTokLinkResolver
 from core.source_quality import filter_download_candidates, is_compressed_source
-from core.tiktok.cdn_urls import sort_download_urls
+from core.tiktok.cdn_urls import order_download_urls
 from core.tiktok.hq_meta import build_hq_downloads as build_tiktok_hq, hq_filename as tiktok_hq_filename
 from core.tiktok.parser import TikTokParser
 from core.tiktok.profile_adapter import extract_avatar_from_scope
@@ -136,7 +136,11 @@ class ArchiveOrchestrator:
             shortcode,
             original_url=resolved.original_url,
         )
-        return self.parser.parse_publication(resolved, media_data)
+        bundle = self.parser.parse_publication(resolved, media_data)
+        await self._resolve_publication_hq(
+            bundle, _media_node_from_response(media_data)
+        )
+        return bundle
 
     async def _tiktok_publication_quick(self, resolved: ResolvedLink) -> ArchiveBundle:
         await self.tiktok_fetcher.ensure_session()
@@ -161,7 +165,9 @@ class ArchiveOrchestrator:
             video_id=video_id,
             username=username,
         )
-        return self.tiktok_parser.parse_video_quick(resolved, item)
+        bundle = self.tiktok_parser.parse_video_quick(resolved, item)
+        await self._resolve_tiktok_hq(bundle, item)
+        return bundle
 
     async def _collect_author_profile(
         self,
@@ -439,7 +445,7 @@ class ArchiveOrchestrator:
         ):
             add(video.url)
 
-        return sort_download_urls(urls)
+        return order_download_urls(urls, entries=entries)
 
     @staticmethod
     def _tiktok_video_url_candidates(
@@ -508,9 +514,14 @@ class ArchiveOrchestrator:
                 raise ValueError("Исходное видео недоступно")
 
             urls = self._tiktok_video_url_candidates(video, prefer_hd=True)
+            hq_entries = filter_download_candidates(
+                list(video.extra.get("hq_downloads") or []),
+                source_only=True,
+            )
             try:
                 data, size, used_url = await self.tiktok_fetcher.download_from_urls(
                     urls,
+                    entries=hq_entries,
                     referer=bundle.source_url,
                     label="tiktok_hq",
                 )
@@ -608,11 +619,10 @@ class ArchiveOrchestrator:
         )
         if not video_id:
             raise ValueError("Не удалось извлечь ID видео YouTube")
-        player = await self.youtube_fetcher.fetch_video(
-            resolved.original_url,
-            video_id=video_id,
-        )
-        return self.youtube_parser.parse_video_quick(resolved, player)
+        player = await self.youtube_fetcher.fetch_source_player(video_id)
+        bundle = self.youtube_parser.parse_video_quick(resolved, player)
+        await self._resolve_youtube_hq(bundle, player)
+        return bundle
 
     async def _youtube_publication_deep(
         self,

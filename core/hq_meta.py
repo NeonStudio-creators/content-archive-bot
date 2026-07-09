@@ -159,8 +159,14 @@ def build_hq_downloads(node: dict[str, Any]) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
 
-    for v in extract_video_versions(node):
-        item = _entry_from_version(v, "source")
+    versions = sorted(
+        extract_video_versions(node),
+        key=lambda v: (v.get("width") or 0) * (v.get("height") or 0),
+        reverse=True,
+    )
+    for idx, v in enumerate(versions):
+        tag = "source" if idx == 0 else "progressive"
+        item = _entry_from_version(v, tag)
         if item and item["url"] not in seen_urls:
             seen_urls.add(item["url"])
             entries.append(item)

@@ -20,7 +20,7 @@ from aiogram.types import (
 from core.models import ArchiveBundle, EntityType, MediaAsset
 from core.platforms import Platform
 from core.source_quality import filter_download_candidates
-from core.tiktok.cdn_urls import sort_download_urls
+from core.tiktok.cdn_urls import order_download_urls
 from core.tiktok.hq_meta import build_hq_downloads as build_tiktok_hq_downloads
 from core.profile_adapter import (
     extract_avatar_from_profile_payload,
@@ -446,7 +446,7 @@ class TelegramPresenter:
                 add(extra.get(key))
 
         add(asset.url)
-        return sort_download_urls(urls)
+        return order_download_urls(urls, entries=entries)
 
     async def _refresh_tiktok_asset_urls(
         self,
@@ -505,7 +505,7 @@ class TelegramPresenter:
         for key in ("hq_best_url", "video_url_best"):
             add(extra.get(key))
         add(asset.url)
-        return urls
+        return order_download_urls(urls, entries=entries)
 
     async def _download_youtube_video_bytes(
         self,
@@ -557,9 +557,14 @@ class TelegramPresenter:
                 ):
                     continue
                 return None
+            hq_entries = filter_download_candidates(
+                list(asset.extra.get("hq_downloads") or []),
+                source_only=prefer_hd,
+            )
             try:
                 data, _, _ = await self.tiktok_fetcher.download_from_urls(
                     urls,
+                    entries=hq_entries,
                     referer=referer,
                     label=label,
                     max_bytes=max_bytes,
@@ -645,7 +650,7 @@ class TelegramPresenter:
             logger.warning("%s download failed: %s", label, exc)
         return None
 
-    async def _send_tiktok_preview(
+    async def _send_downloaded_video_preview(
         self,
         message: Message,
         bundle: ArchiveBundle,
@@ -655,7 +660,7 @@ class TelegramPresenter:
         keyboard: InlineKeyboardMarkup | None,
         report_fallback: str | None,
     ) -> bool:
-        """TikTok CDN не отдаёт Telegram — скачиваем и шлём файлом."""
+        """Скачиваем исходник и шлём файлом — Telegram не пережимает по URL."""
         cap = th.truncate_html(caption, TG_CAPTION_MAX) if caption else None
         cover_url = preview.thumbnail_url or preview.url
 
@@ -743,9 +748,8 @@ class TelegramPresenter:
         keyboard: InlineKeyboardMarkup | None = None,
         report_fallback: str | None = None,
     ) -> bool:
-        platform = self._bundle_platform(bundle)
-        if platform in (Platform.TIKTOK, Platform.YOUTUBE):
-            return await self._send_tiktok_preview(
+        if preview.media_type == "video":
+            return await self._send_downloaded_video_preview(
                 message,
                 bundle,
                 preview,
@@ -757,32 +761,17 @@ class TelegramPresenter:
         use_photo = preview.media_type != "video"
         cap = th.truncate_html(caption, TG_CAPTION_MAX) if caption else None
         try:
-            if use_photo:
-                await message.answer_photo(
-                    photo=preview.url,
-                    caption=cap,
-                    parse_mode="HTML" if cap else None,
-                    reply_markup=keyboard,
-                )
-            else:
-                await message.answer_video(
-                    video=preview.url,
-                    caption=cap,
-                    parse_mode="HTML" if cap else None,
-                    reply_markup=keyboard,
-                )
+            await message.answer_photo(
+                photo=preview.url,
+                caption=cap,
+                parse_mode="HTML" if cap else None,
+                reply_markup=keyboard,
+            )
             return True
         except TelegramBadRequest as exc:
             logger.warning("Hub media error: %s", exc)
             try:
-                if use_photo:
-                    await message.answer_photo(
-                        preview.url, reply_markup=keyboard
-                    )
-                else:
-                    await message.answer_video(
-                        preview.url, reply_markup=keyboard
-                    )
+                await message.answer_photo(preview.url, reply_markup=keyboard)
                 if report_fallback:
                     await self._send_html(message, report_fallback, keyboard)
                 elif cap:
@@ -1970,10 +1959,26 @@ class TelegramPresenter:
                 th.truncate_html(caption, 500),
             ):
                 try:
+                    await message.answer_document(
+                        doc,
+                        caption=attempt_cap,
+                        parse_mode="HTML",
+                        reply_markup=keyboard,
+                    )
+                    return
+                except TelegramBadRequest as exc:
+                    logger.warning("HQ document send: %s", exc)
+
+            for attempt_cap in (
+                safe_caption,
+                th.truncate_html(caption, 900),
+                None,
+            ):
+                try:
                     await message.answer_video(
                         video=doc,
                         caption=attempt_cap,
-                        parse_mode="HTML",
+                        parse_mode="HTML" if attempt_cap else None,
                         reply_markup=keyboard,
                         duration=duration,
                         width=width,

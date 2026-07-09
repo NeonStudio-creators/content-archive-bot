@@ -88,11 +88,9 @@ class TikTokParser:
             stats = safe_dict(item.get("stats"))
             video = safe_dict(item.get("video"))
             music = safe_dict(item.get("music"))
-            play_url = (
-                item.get("play")
-                or video.get("playAddr")
-                or video.get("downloadAddr")
-            )
+            play_url = item.get("play") or video.get("playAddr")
+            download_addr = video.get("downloadAddr")
+            bitrate_info = item.get("bitrateInfo") or video.get("bitrateInfo") or []
             title = item.get("desc") or ""
             username = author.get("uniqueId")
             display = author.get("nickname")
@@ -111,8 +109,9 @@ class TikTokParser:
                 "id": video_id,
                 "title": title,
                 "play": play_url,
-                "hdplay": item.get("hdplay") or video.get("downloadAddr") or play_url,
+                "hdplay": item.get("hdplay") or download_addr,
                 "wmplay": item.get("wmplay"),
+                "bitrateInfo": bitrate_info,
                 "cover": cover,
                 "duration": duration,
                 "play_count": view_count,
@@ -152,7 +151,6 @@ class TikTokParser:
             width = safe_dict(item.get("video")).get("width")
             height = safe_dict(item.get("video")).get("height")
 
-        preview_url = mirror_item.get("play") or mirror_item.get("hdplay") or cover or ""
         extra = build_hq_downloads(mirror_item)
         extra.update(extract_audio_sources(mirror_item))
         for key in ("play", "hdplay", "wmplay", "cover"):
@@ -163,11 +161,19 @@ class TikTokParser:
         if deep:
             extra["deep_collected"] = True
 
+        preview_url = (
+            extra.get("hq_best_url")
+            or mirror_item.get("hdplay")
+            or mirror_item.get("play")
+            or cover
+            or ""
+        )
+
         media = [
             MediaAsset(
                 id=video_id,
                 media_type="video",
-                url=extra.get("hq_best_url") or preview_url or "",
+                url=preview_url,
                 width=extra.get("width") or width,
                 height=extra.get("height") or height,
                 thumbnail_url=cover,

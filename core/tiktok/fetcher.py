@@ -16,7 +16,10 @@ import aiohttp
 from config import Settings
 from core.session_bootstrap import merge_cookies, parse_set_cookies
 from core.tiktok.auth import TikTokSessionAuthManager
-from core.tiktok.cdn_urls import is_restricted_download_url, sort_download_urls
+from core.tiktok.cdn_urls import (
+    is_restricted_download_url,
+    order_download_urls,
+)
 from core.tiktok.resolver import TikTokLinkResolver
 from utils.rate_limit import QuietRateLimiter
 from utils.retry import with_retry
@@ -575,13 +578,14 @@ class TikTokFetcher:
         self,
         urls: list[str],
         *,
+        entries: list[dict[str, Any]] | None = None,
         referer: str | None = None,
         label: str = "tiktok_media",
         max_bytes: int = 48 * 1024 * 1024,
     ) -> tuple[bytes, int, str]:
-        """Пробует список CDN-URL по очереди (mirror CDN раньше webapp-prime)."""
+        """Пробует URL: сначала исходное качество, затем доступный CDN."""
         errors: list[str] = []
-        for url in sort_download_urls(urls):
+        for url in order_download_urls(urls, entries=entries):
             if not url or not str(url).startswith("http"):
                 continue
             try:
