@@ -9,13 +9,15 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 from urllib.parse import urlparse
 
 import aiohttp
 
 from config import Settings
 from core.auth import SessionAuthManager
+from core.auth_errors import is_instagram_auth_error
 from core.media_adapter import (
     from_embedded_json,
     from_graphql_polaris,
@@ -239,6 +241,20 @@ class GraphQLFetcher:
         self._session: aiohttp.ClientSession | None = None
         self._lsd_token: str | None = None
         self._session_ready = False
+        self._auth_refresh_callback: Callable[[], Awaitable[None]] | None = None
+
+    def set_auth_refresh_callback(
+        self, callback: Callable[[], Awaitable[None]] | None
+    ) -> None:
+        self._auth_refresh_callback = callback
+
+    def _absorb_response_cookies(self, headers: Any) -> None:
+        cookies = parse_set_cookies(headers)
+        if not cookies:
+            return
+        self.auth.update_runtime_cookies(cookies)
+        if cookies.get("lsd"):
+            self._lsd_token = cookies["lsd"]
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -250,10 +266,12 @@ class GraphQLFetcher:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    async def ensure_session(self) -> None:
+    async def ensure_session(self, *, force: bool = False) -> None:
         """Прогрев: получает csrftoken / mid / ig_did с главной страницы."""
-        if self._session_ready:
+        if self._session_ready and not force:
             return
+        if force:
+            self._session_ready = False
 
         referer = f"{self.settings.platform_base_url}/"
         try:
@@ -269,9 +287,12 @@ class GraphQLFetcher:
                 allow_redirects=True,
             ) as resp:
                 body = await resp.text()
-                set_cookies = parse_set_cookies(resp.headers)
+                self._absorb_response_cookies(resp.headers)
                 html_tokens = parse_tokens_from_html(body)
-                merged = merge_cookies(set_cookies, html_tokens)
+                merged = merge_cookies(
+                    parse_set_cookies(resp.headers),
+                    html_tokens,
+                )
                 self.auth.update_runtime_cookies(merged)
                 if merged.get("lsd"):
                     self._lsd_token = merged["lsd"]
@@ -319,6 +340,7 @@ class GraphQLFetcher:
                 cookies=cookies,
             ) as resp:
                 body = await resp.text()
+                self._absorb_response_cookies(resp.headers)
                 if resp.status >= 400:
                     logger.warning(
                         "%s: HTTP %s — %s", label, resp.status, body[:300]
@@ -329,12 +351,25 @@ class GraphQLFetcher:
                 except json.JSONDecodeError:
                     return body
 
-        return await with_retry(
-            _do_request,
-            max_retries=self.settings.max_retries,
-            backoff_sec=self.settings.retry_backoff_sec,
-            label=label,
-        )
+        for auth_pass in range(2):
+            try:
+                return await with_retry(
+                    _do_request,
+                    max_retries=self.settings.max_retries,
+                    backoff_sec=self.settings.retry_backoff_sec,
+                    label=label,
+                )
+            except aiohttp.ClientResponseError as exc:
+                if auth_pass == 0 and exc.status in (401, 403):
+                    logger.info("%s: auth error, refreshing tokens", label)
+                    if self._auth_refresh_callback:
+                        await self._auth_refresh_callback()
+                    else:
+                        await self.ensure_session(force=True)
+                    continue
+                raise
+
+        raise RuntimeError(f"{label}: auth refresh exhausted")
 
     async def graphql(
         self,
@@ -735,11 +770,7 @@ class GraphQLFetcher:
         }
 
     def _csrf_source_label(self) -> str:
-        if self.settings.csrf_token:
-            return "Railway (CSRF_TOKEN)"
-        if self.auth._runtime_cookies.get("csrftoken"):
-            return "bootstrap instagram.com"
-        return "нет"
+        return self.auth.csrf_source_label()
 
     async def _probe_web_profile_info(
         self, username: str, referer: str
@@ -748,33 +779,61 @@ class GraphQLFetcher:
         if not self.auth.session_id:
             return None, "sessionid не задан (SESSION_TOKEN)"
         if not self.auth.get_csrf_token():
-            return None, "csrftoken отсутствует — добавьте CSRF_TOKEN в Railway"
-        try:
-            await self.rate_limiter.wait()
-            session = await self._get_session()
-            headers = self.auth.build_web_api_headers(referer)
-            cookies = self.auth.build_cookies()
-            async with session.get(
-                f"{self.settings.platform_base_url}/api/v1/users/web_profile_info/",
-                params={"username": username},
-                headers=headers,
-                cookies=cookies,
-            ) as resp:
-                body = await resp.text()
-                if resp.status >= 400:
-                    return None, f"HTTP {resp.status}: {body[:200]}"
-                payload = json.loads(body)
-            if not isinstance(payload, dict):
-                return None, "невалидный JSON"
-            if payload.get("status") == "fail":
-                msg = str(payload.get("message") or "fail")
-                return None, f"API: {msg}"
-            result = from_web_profile_info(payload)
-            if result:
-                return result, ""
-            return None, "пустой user в ответе"
-        except Exception as exc:
-            return None, str(exc)
+            return None, "csrftoken отсутствует — дождитесь bootstrap или добавьте CSRF_TOKEN"
+        last_err = ""
+        for auth_pass in range(2):
+            try:
+                await self.rate_limiter.wait()
+                session = await self._get_session()
+                headers = self.auth.build_web_api_headers(referer)
+                cookies = self.auth.build_cookies()
+                async with session.get(
+                    f"{self.settings.platform_base_url}/api/v1/users/web_profile_info/",
+                    params={"username": username},
+                    headers=headers,
+                    cookies=cookies,
+                ) as resp:
+                    body = await resp.text()
+                    self._absorb_response_cookies(resp.headers)
+                    if resp.status >= 400:
+                        last_err = f"HTTP {resp.status}: {body[:200]}"
+                        if (
+                            auth_pass == 0
+                            and is_instagram_auth_error(resp.status, body)
+                        ):
+                            if self._auth_refresh_callback:
+                                await self._auth_refresh_callback()
+                            else:
+                                await self.ensure_session(force=True)
+                            continue
+                        return None, last_err
+                    payload = json.loads(body)
+                if not isinstance(payload, dict):
+                    return None, "невалидный JSON"
+                if payload.get("status") == "fail":
+                    msg = str(payload.get("message") or "fail")
+                    last_err = f"API: {msg}"
+                    if auth_pass == 0 and is_instagram_auth_error(200, body, payload):
+                        if self._auth_refresh_callback:
+                            await self._auth_refresh_callback()
+                        else:
+                            await self.ensure_session(force=True)
+                        continue
+                    return None, last_err
+                result = from_web_profile_info(payload)
+                if result:
+                    return result, ""
+                return None, "пустой user в ответе"
+            except Exception as exc:
+                last_err = str(exc)
+                if auth_pass == 0:
+                    if self._auth_refresh_callback:
+                        await self._auth_refresh_callback()
+                    else:
+                        await self.ensure_session(force=True)
+                    continue
+                return None, last_err
+        return None, last_err or "auth refresh не помог"
 
     async def _fetch_profile_via_web_api(
         self, username: str, referer: str

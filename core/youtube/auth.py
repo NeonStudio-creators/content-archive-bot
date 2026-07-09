@@ -8,17 +8,36 @@ YOUTUBE_SESSION_TOKEN — строка cookies из браузера (F12 → Ap
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from config import Settings
 from utils.tokens import parse_cookie_string
+
+logger = logging.getLogger(__name__)
+
+YOUTUBE_REFRESHABLE_KEYS = frozenset({
+    "VISITOR_INFO1_LIVE",
+    "YSC",
+    "PREF",
+    "GPS",
+    "__Secure-YEC",
+    "ST-tladl",
+})
 
 
 @dataclass
 class YouTubeSessionAuthManager:
     settings: Settings
     _runtime_cookies: dict[str, str] = field(default_factory=dict)
+    _persist_callback: Callable[[], None] | None = field(
+        default=None, repr=False, compare=False
+    )
+
+    def set_persist_callback(self, callback: Callable[[], None] | None) -> None:
+        self._persist_callback = callback
 
     def _configured_cookies(self) -> dict[str, str]:
         raw = self.settings.youtube_session_token.strip()
@@ -26,8 +45,25 @@ class YouTubeSessionAuthManager:
             return {}
         return parse_cookie_string(raw)
 
+    def apply_cached_cookies(self, cookies: dict[str, str]) -> None:
+        filtered = {k: v for k, v in cookies.items() if v}
+        if filtered:
+            self._runtime_cookies.update(filtered)
+
     def update_runtime_cookies(self, cookies: dict[str, str]) -> None:
-        self._runtime_cookies.update({k: v for k, v in cookies.items() if v})
+        filtered = {k: v for k, v in cookies.items() if v}
+        if not filtered:
+            return
+        self._runtime_cookies.update(filtered)
+        if self._persist_callback:
+            self._persist_callback()
+
+    def export_refreshable_cookies(self) -> dict[str, str]:
+        return {
+            k: v
+            for k, v in self._runtime_cookies.items()
+            if k in YOUTUBE_REFRESHABLE_KEYS and v
+        }
 
     def build_cookies(self) -> dict[str, str]:
         from utils.tokens import _is_valid_cookie_key, _normalize_cookie_key

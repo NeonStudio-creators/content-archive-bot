@@ -44,6 +44,17 @@ def create_bot(settings: Settings) -> tuple[Bot, Dispatcher, ArchiveOrchestrator
     return bot, dp, orchestrator
 
 
+def register_startup(dp: Dispatcher, orchestrator: ArchiveOrchestrator) -> None:
+    """Прогрев сессий и фоновое автообновление cookies."""
+
+    async def _on_startup() -> None:
+        await orchestrator.token_refresher.startup()
+        orchestrator.token_refresher.start_background()
+        logger.info("Token auto-refresh активен")
+
+    dp.startup.register(_on_startup)
+
+
 def register_shutdown(dp: Dispatcher, orchestrator: ArchiveOrchestrator) -> None:
     """Регистрирует graceful shutdown (aiogram 3 вызывает handler без аргументов)."""
 

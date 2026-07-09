@@ -69,7 +69,7 @@ HELP_TEXT = """
 ───────────────
 <code>TELEGRAM_BOT_TOKEN</code>
 <code>SESSION_TOKEN</code>
-<code>CSRF_TOKEN</code> — обязателен (cookie csrftoken)
+<code>CSRF_TOKEN</code> — опционально (csrftoken обновляется автоматически)
 <code>TIKTOK_SESSION_TOKEN</code> — sessionid с tiktok.com
 <code>TIKTOK_CSRF_TOKEN</code> — tt_csrf_token (опционально)
 <code>YOUTUBE_SESSION_TOKEN</code> — cookies с youtube.com (SID, SAPISID, …)
@@ -88,11 +88,17 @@ def setup_commands(orchestrator: ArchiveOrchestrator) -> Router:
         ]
         try:
             ig = await orchestrator.fetcher.verify_instagram_session()
+            interval = orchestrator.settings.token_refresh_interval_sec
+            refresh_note = (
+                f"каждые {int(interval)} с"
+                if interval > 0
+                else "фон отключён"
+            )
             lines.extend([
                 f"SESSION_TOKEN · {'OK' if ig.session_id_ok else 'нет'}",
-                f"CSRF_TOKEN · {'OK' if ig.csrf_ok else 'нет — добавьте в Railway'}",
-                f"Bootstrap · csrftoken "
-                f"{'OK' if ig.csrf_ok else 'MISSING'} ({ig.csrf_source})",
+                f"CSRF · {'OK' if ig.csrf_ok else 'нет — ждём bootstrap'}",
+                f"Источник CSRF · {ig.csrf_source}",
+                f"Автообновление · {refresh_note}",
             ])
             if ig.ok:
                 lines.append(

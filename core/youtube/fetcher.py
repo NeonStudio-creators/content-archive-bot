@@ -55,9 +55,11 @@ class YouTubeFetcher:
             ctx["visitorData"] = self._visitor_id
         return {"client": ctx}
 
-    async def ensure_session(self) -> None:
-        if self._bootstrapped:
+    async def ensure_session(self, *, force: bool = False) -> None:
+        if self._bootstrapped and not force:
             return
+        if force:
+            self._bootstrapped = False
         session = await self._get_session()
         try:
             await self.rate_limiter.wait()

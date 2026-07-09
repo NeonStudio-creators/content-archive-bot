@@ -35,6 +35,8 @@ from core.youtube.hq_meta import hq_filename as youtube_hq_filename
 from core.youtube.audio_meta import extract_audio_sources as extract_youtube_audio
 from core.youtube.parser import YouTubeParser
 from core.youtube.resolver import YouTubeLinkResolver
+from core.token_refresh import TokenRefresher
+from core.token_store import TokenStore
 from utils.dict_utils import dig, safe_dict
 from utils.rate_limit import QuietRateLimiter
 
@@ -92,8 +94,23 @@ class ArchiveOrchestrator:
             settings, self.youtube_auth, self.rate_limiter
         )
         self.youtube_parser = YouTubeParser()
+        self.token_store = TokenStore(settings.token_cache_path)
+        self.token_refresher = TokenRefresher(
+            settings=settings,
+            store=self.token_store,
+            instagram_auth=self.auth,
+            ig_fetcher=self.fetcher,
+            tiktok_auth=self.tiktok_auth,
+            tiktok_fetcher=self.tiktok_fetcher,
+            youtube_auth=self.youtube_auth,
+            youtube_fetcher=self.youtube_fetcher,
+        )
+        self.fetcher.set_auth_refresh_callback(
+            lambda: self.token_refresher.refresh_on_auth_failure("instagram")
+        )
 
     async def close(self) -> None:
+        await self.token_refresher.stop_background()
         await self.fetcher.close()
         await self.tiktok_fetcher.close()
         await self.youtube_fetcher.close()

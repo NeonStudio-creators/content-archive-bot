@@ -15,7 +15,7 @@ import sys
 
 from aiogram.exceptions import TelegramAPIError, TelegramUnauthorizedError
 
-from bot.app import create_bot, register_shutdown
+from bot.app import create_bot, register_shutdown, register_startup
 from config import Settings, log_config_status
 
 logging.basicConfig(
@@ -39,6 +39,7 @@ async def main() -> None:
         sys.exit(1)
 
     bot, dp, orchestrator = create_bot(settings)
+    register_startup(dp, orchestrator)
     register_shutdown(dp, orchestrator)
 
     logger.info("ContentExplorer запущен. Ожидаю сообщения…")

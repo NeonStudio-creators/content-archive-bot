@@ -4,6 +4,8 @@ SessionAuthManager — управление авторизацией через 
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from config import Settings
@@ -16,6 +18,19 @@ from utils.tokens import (
 MOBILE_APP_ID = "567067343352427"
 WEB_APP_ID = "936619743392459"
 WEB_ASBD_ID = "129477"
+
+logger = logging.getLogger(__name__)
+
+INSTAGRAM_REFRESHABLE_KEYS = frozenset({
+    "csrftoken",
+    "mid",
+    "ig_did",
+    "ig_nrcb",
+    "lsd",
+    "rur",
+    "wd",
+    "dpr",
+})
 
 MOBILE_USER_AGENT = (
     "Instagram 385.0.0.47.74 Android (34/14; 480dpi; 1344x2992; "
@@ -32,18 +47,55 @@ class SessionAuthManager:
 
     settings: Settings
     _runtime_cookies: dict[str, str] = field(default_factory=dict)
+    _persist_callback: Callable[[], None] | None = field(
+        default=None, repr=False, compare=False
+    )
 
     @property
     def session_id(self) -> str:
         return normalize_session_token(self.settings.session_token)
 
+    def set_persist_callback(self, callback: Callable[[], None] | None) -> None:
+        self._persist_callback = callback
+
+    def apply_cached_cookies(self, cookies: dict[str, str]) -> None:
+        filtered = {k: v for k, v in cookies.items() if v and k != "sessionid"}
+        if filtered:
+            self._runtime_cookies.update(filtered)
+
     def update_runtime_cookies(self, cookies: dict[str, str]) -> None:
-        self._runtime_cookies.update({k: v for k, v in cookies.items() if v})
+        before_csrf = self._runtime_cookies.get("csrftoken")
+        filtered = {k: v for k, v in cookies.items() if v and k != "sessionid"}
+        if not filtered:
+            return
+        self._runtime_cookies.update(filtered)
+        after_csrf = self._runtime_cookies.get("csrftoken")
+        if after_csrf and after_csrf != before_csrf:
+            logger.info("instagram csrftoken auto-refreshed")
+        if self._persist_callback:
+            self._persist_callback()
 
     def get_csrf_token(self) -> str:
+        runtime = self._runtime_cookies.get("csrftoken", "")
+        if runtime:
+            return normalize_csrf_token(runtime)
         if self.settings.csrf_token:
             return normalize_csrf_token(self.settings.csrf_token)
-        return self._runtime_cookies.get("csrftoken", "")
+        return ""
+
+    def csrf_source_label(self) -> str:
+        if self._runtime_cookies.get("csrftoken"):
+            return "auto-refresh (instagram.com)"
+        if self.settings.csrf_token:
+            return "Railway (начальный CSRF_TOKEN)"
+        return "нет"
+
+    def export_refreshable_cookies(self) -> dict[str, str]:
+        return {
+            k: v
+            for k, v in self._runtime_cookies.items()
+            if k in INSTAGRAM_REFRESHABLE_KEYS and v
+        }
 
     def build_cookies(self) -> dict[str, str]:
         cookies: dict[str, str] = {"sessionid": self.session_id}

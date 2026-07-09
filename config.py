@@ -62,6 +62,10 @@ class Settings:
     max_media_per_message: int = 10
     json_dump_threshold_kb: int = 48
 
+    # Автообновление cookies (csrftoken и др.)
+    token_cache_path: str = ""
+    token_refresh_interval_sec: float = 1800.0
+
     @classmethod
     def from_env(cls) -> Settings:
         token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -71,6 +75,10 @@ class Settings:
             raise ValueError("TELEGRAM_BOT_TOKEN не задан в окружении")
         if not session:
             raise ValueError("SESSION_TOKEN не задан в окружении")
+
+        cache_path = os.getenv("TOKEN_CACHE_PATH", "").strip()
+        if not cache_path:
+            cache_path = str(_PROJECT_ROOT / ".token_cache.json")
 
         return cls(
             telegram_bot_token=token,
@@ -124,6 +132,10 @@ class Settings:
             profile_max_highlights_fetch=int(
                 os.getenv("PROFILE_MAX_HIGHLIGHTS_FETCH", "0")
             ),
+            token_cache_path=cache_path,
+            token_refresh_interval_sec=float(
+                os.getenv("TOKEN_REFRESH_INTERVAL_SEC", "1800")
+            ),
         )
 
 
@@ -141,6 +153,8 @@ def log_config_status() -> None:
         "TIKTOK_SESSION_TOKEN",
         "TIKTOK_CSRF_TOKEN",
         "YOUTUBE_SESSION_TOKEN",
+        "TOKEN_CACHE_PATH",
+        "TOKEN_REFRESH_INTERVAL_SEC",
         "REQUEST_DELAY_SEC",
         "MAX_RETRIES",
     )

@@ -1,6 +1,7 @@
 # Секреты
 .env
 *.env.local
+.token_cache.json
 
 # Python
 __pycache__/
