@@ -112,6 +112,9 @@ class ArchiveOrchestrator:
         self.fetcher.set_auth_refresh_callback(
             lambda: self.token_refresher.refresh_on_auth_failure("instagram")
         )
+        self.youtube_fetcher.set_auth_refresh_callback(
+            lambda: self.token_refresher.refresh_on_auth_failure("youtube")
+        )
 
     async def close(self) -> None:
         await self.token_refresher.stop_background()

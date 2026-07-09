@@ -19,6 +19,18 @@ from utils.tokens import parse_cookie_string
 logger = logging.getLogger(__name__)
 
 YOUTUBE_REFRESHABLE_KEYS = frozenset({
+    "SID",
+    "HSID",
+    "SSID",
+    "APISID",
+    "SAPISID",
+    "__Secure-1PSID",
+    "__Secure-3PSID",
+    "__Secure-1PAPISID",
+    "__Secure-3PAPISID",
+    "__Secure-1PSIDTS",
+    "__Secure-3PSIDTS",
+    "LOGIN_INFO",
     "VISITOR_INFO1_LIVE",
     "YSC",
     "PREF",
@@ -51,19 +63,46 @@ class YouTubeSessionAuthManager:
             self._runtime_cookies.update(filtered)
 
     def update_runtime_cookies(self, cookies: dict[str, str]) -> None:
+        before = set(self._runtime_cookies.keys())
         filtered = {k: v for k, v in cookies.items() if v}
         if not filtered:
             return
         self._runtime_cookies.update(filtered)
+        rotated = set(self._runtime_cookies.keys()) - before
+        session_keys = rotated & {
+            "SID",
+            "__Secure-1PSID",
+            "SAPISID",
+            "__Secure-1PAPISID",
+            "VISITOR_INFO1_LIVE",
+        }
+        if session_keys:
+            logger.info("youtube cookies auto-refreshed: %s", sorted(session_keys))
         if self._persist_callback:
             self._persist_callback()
 
     def export_refreshable_cookies(self) -> dict[str, str]:
-        return {
+        exported = {
             k: v
             for k, v in self._runtime_cookies.items()
             if k in YOUTUBE_REFRESHABLE_KEYS and v
         }
+        cookies = self.build_cookies()
+        for key in YOUTUBE_REFRESHABLE_KEYS:
+            if key in cookies and cookies[key] and key not in exported:
+                exported[key] = cookies[key]
+        return exported
+
+    def session_source_label(self) -> str:
+        runtime_session = bool(
+            self._runtime_cookies.get("SID")
+            or self._runtime_cookies.get("__Secure-1PSID")
+        )
+        if runtime_session:
+            return "auto-refresh (youtube.com)"
+        if self._configured_cookies():
+            return "Railway (начальный YOUTUBE_SESSION_TOKEN)"
+        return "нет"
 
     def build_cookies(self) -> dict[str, str]:
         from utils.tokens import _is_valid_cookie_key, _normalize_cookie_key

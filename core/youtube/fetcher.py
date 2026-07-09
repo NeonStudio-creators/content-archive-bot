@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 import aiohttp
@@ -24,6 +25,7 @@ from core.youtube.innertube_clients import (
     build_client_context,
 )
 from core.youtube.resolver import YouTubeLinkResolver
+from core.youtube.session_verify import YouTubeSessionVerify
 from utils.rate_limit import QuietRateLimiter
 
 logger = logging.getLogger(__name__)
@@ -44,7 +46,17 @@ class YouTubeFetcher:
     rate_limiter: QuietRateLimiter
     _session: aiohttp.ClientSession | None = field(default=None, init=False)
     _bootstrapped: bool = field(default=False, init=False)
+    _auth_bootstrapped: bool = field(default=False, init=False)
     _visitor_id: str = field(default="", init=False)
+    _auth_refresh_callback: Callable[[], Awaitable[None]] | None = field(
+        default=None, init=False, repr=False
+    )
+
+    def set_auth_refresh_callback(
+        self,
+        callback: Callable[[], Awaitable[None]] | None,
+    ) -> None:
+        self._auth_refresh_callback = callback
 
     async def close(self) -> None:
         if self._session and not self._session.closed:
@@ -99,7 +111,7 @@ class YouTubeFetcher:
                 return match.group(1)
         return ""
 
-    async def ensure_session(self, *, force: bool = False) -> None:
+    async def _bootstrap_visitor(self, *, force: bool = False) -> None:
         if self._bootstrapped and not force:
             return
         if force:
@@ -129,9 +141,62 @@ class YouTubeFetcher:
                         self._visitor_id = visitor
                         break
         except Exception as exc:
-            logger.warning("youtube bootstrap failed: %s", exc)
+            logger.warning("youtube visitor bootstrap failed: %s", exc)
         finally:
             self._bootstrapped = True
+
+    async def bootstrap_auth_session(self, *, force: bool = False) -> bool:
+        """Прогрев с cookies: Set-Cookie → runtime + .token_cache.json."""
+        if not self.auth.is_configured():
+            return False
+        if self._auth_bootstrapped and not force:
+            return True
+        if force:
+            self._auth_bootstrapped = False
+
+        await self._bootstrap_visitor(force=force)
+        session = await self._get_session()
+        pages = (
+            f"{self.settings.youtube_base_url}/",
+            f"{self.settings.youtube_base_url}/feed/you",
+            "https://m.youtube.com/",
+            f"{self.settings.youtube_base_url}/account",
+        )
+        try:
+            for page_url in pages:
+                await self.rate_limiter.wait()
+                headers = self.auth.build_headers(referer=page_url)
+                async with session.get(
+                    page_url,
+                    headers=headers,
+                    cookies=self._request_cookies(use_auth=True),
+                    allow_redirects=True,
+                ) as resp:
+                    html = await resp.text()
+                    merged = merge_cookies(
+                        parse_set_cookies(resp.headers),
+                        self.auth.build_cookies(),
+                    )
+                    self.auth.update_runtime_cookies(merged)
+                    visitor = self._extract_visitor_id(html)
+                    if visitor:
+                        self._visitor_id = visitor
+            logger.info(
+                "youtube auth bootstrap: cookies=%s visitor=%s",
+                list(self.auth.build_cookies().keys()),
+                "OK" if self._visitor_id else "MISSING",
+            )
+            self._auth_bootstrapped = True
+            return True
+        except Exception as exc:
+            logger.warning("youtube auth bootstrap failed: %s", exc)
+            self._auth_bootstrapped = True
+            return False
+
+    async def ensure_session(self, *, force: bool = False) -> None:
+        await self._bootstrap_visitor(force=force)
+        if self.auth.is_configured():
+            await self.bootstrap_auth_session(force=force)
 
     def _request_cookies(self, *, use_auth: bool) -> dict[str, str]:
         cookies = dict(self._consent_cookies())
@@ -531,8 +596,8 @@ class YouTubeFetcher:
         player["_canonical_url"] = canonical
         return player
 
-    async def fetch_source_player(self, video_id: str) -> dict[str, Any]:
-        """Исходные потоки — HTML + каскад InnerTube (сначала без cookies)."""
+    async def _fetch_source_player_once(self, video_id: str) -> dict[str, Any]:
+        """Один проход: HTML + InnerTube."""
         canonical = YouTubeLinkResolver.watch_url(video_id)
         player: dict[str, Any] | None = None
         errors: list[str] = []
@@ -587,6 +652,89 @@ class YouTubeFetcher:
             )
 
         return self._finalize_player(player, video_id, canonical)
+
+    async def fetch_source_player(self, video_id: str) -> dict[str, Any]:
+        """Исходные потоки — с автообновлением cookies и повтором."""
+        await self.ensure_session()
+        try:
+            return await self._fetch_source_player_once(video_id)
+        except ValueError:
+            if not self.auth.is_configured():
+                raise
+            logger.info("youtube: refresh cookies and retry")
+            if self._auth_refresh_callback:
+                await self._auth_refresh_callback()
+            else:
+                await self.bootstrap_auth_session(force=True)
+            try:
+                return await self._fetch_source_player_once(video_id)
+            except ValueError:
+                raise
+
+    async def verify_session(
+        self,
+        *,
+        test_video_id: str = "dQw4w9WgXcQ",
+    ) -> YouTubeSessionVerify:
+        result = YouTubeSessionVerify(
+            configured=self.auth.is_configured(),
+            cookie_count=len(self.auth.build_cookies()),
+            session_ok=False,
+            visitor_ok=bool(self._visitor_id),
+        )
+        if not result.configured:
+            result.errors.append("YOUTUBE_SESSION_TOKEN не задан")
+            return result
+
+        await self.bootstrap_auth_session(force=True)
+        result.visitor_ok = bool(self._visitor_id)
+        result.cookie_count = len(self.auth.build_cookies())
+        result.session_ok = self.auth.is_configured()
+
+        mweb = next(c for c in AUTH_INNERTUBE_CLIENTS if c.name == "MWEB")
+        try:
+            data = await self._innertube_post(
+                "player",
+                {"videoId": test_video_id},
+                referer=YouTubeLinkResolver.watch_url(test_video_id),
+                client=mweb,
+                use_auth=True,
+            )
+            if self._player_ok(data):
+                result.test_streams = self._stream_url_count(
+                    data.get("streamingData")
+                )
+                result.client = "MWEB"
+            else:
+                result.errors.append(
+                    f"MWEB: {self._playability_reason(data)}"
+                )
+        except Exception as exc:
+            result.errors.append(f"MWEB: {exc}")
+
+        if not result.test_streams:
+            for client in ANON_INNERTUBE_CLIENTS[:2]:
+                try:
+                    data = await self._innertube_post(
+                        "player",
+                        {"videoId": test_video_id},
+                        referer=YouTubeLinkResolver.watch_url(test_video_id),
+                        client=client,
+                        use_auth=False,
+                    )
+                    if self._player_ok(data):
+                        result.test_streams = self._stream_url_count(
+                            data.get("streamingData")
+                        )
+                        result.client = client.name
+                        break
+                    result.errors.append(
+                        f"{client.name}: {self._playability_reason(data)}"
+                    )
+                except Exception as exc:
+                    result.errors.append(f"{client.name}: {exc}")
+
+        return result
 
     async def fetch_video(self, url: str, *, video_id: str | None = None) -> dict[str, Any]:
         vid = video_id or YouTubeLinkResolver.extract_video_id(url)

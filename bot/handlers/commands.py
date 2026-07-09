@@ -72,7 +72,7 @@ HELP_TEXT = """
 <code>CSRF_TOKEN</code> — опционально (csrftoken обновляется автоматически)
 <code>TIKTOK_SESSION_TOKEN</code> — sessionid с tiktok.com
 <code>TIKTOK_CSRF_TOKEN</code> — tt_csrf_token (опционально)
-<code>YOUTUBE_SESSION_TOKEN</code> — cookies с youtube.com (SID, SAPISID, …)
+<code>YOUTUBE_SESSION_TOKEN</code> — cookies с youtube.com (обновляются автоматически)
 """
 
 
@@ -128,8 +128,35 @@ def setup_commands(orchestrator: ArchiveOrchestrator) -> Router:
             "",
             "<b>YouTube</b>",
             f"YOUTUBE_SESSION_TOKEN · {'OK' if orchestrator.youtube_auth.is_configured() else 'нет'}",
+            f"Источник cookies · {orchestrator.youtube_auth.session_source_label()}",
             f"Cookies · {len(yt_cookies)} шт.",
         ])
+        try:
+            yt = await orchestrator.youtube_fetcher.verify_session()
+            interval = orchestrator.settings.token_refresh_interval_sec
+            refresh_note = (
+                f"каждые {int(interval)} с"
+                if interval > 0
+                else "фон отключён"
+            )
+            lines.append(f"Автообновление · {refresh_note}")
+            if yt.ok:
+                lines.append(
+                    f"Тест API · OK ({yt.test_streams} потоков, {yt.client})"
+                )
+            else:
+                lines.append("Тест API · не удалось")
+                if not yt.configured:
+                    lines.append(
+                        "  · задайте YOUTUBE_SESSION_TOKEN (SID, SAPISID, "
+                        "__Secure-1PSID, __Secure-1PAPISID)"
+                    )
+                elif not yt.visitor_ok:
+                    lines.append("  · нет visitor_id — ждём bootstrap")
+                for err in yt.errors[:4]:
+                    lines.append(f"  · {err}")
+        except Exception as exc:
+            lines.append(f"Тест API · ошибка: {exc}")
         await message.answer("\n".join(lines), parse_mode="HTML")
 
     return router

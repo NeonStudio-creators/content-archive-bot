@@ -103,7 +103,7 @@ class TokenRefresher:
             await self.tiktok_fetcher.ensure_session(force=True)
             self.persist_platform("tiktok")
         elif platform == "youtube":
-            await self.youtube_fetcher.ensure_session(force=True)
+            await self.youtube_fetcher.bootstrap_auth_session(force=True)
             self.persist_platform("youtube")
 
     async def periodic_loop(self) -> None:
