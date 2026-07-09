@@ -211,7 +211,6 @@ class LinkResolver:
 
 
 @dataclass
-@dataclass
 class InstagramSessionVerify:
     """Результат проверки Instagram-сессии (/session)."""
 
