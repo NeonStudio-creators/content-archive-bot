@@ -25,7 +25,9 @@ from core.youtube.innertube_clients import (
     build_client_context,
 )
 from core.youtube.resolver import YouTubeLinkResolver
+from core.youtube.mirror_fallback import fetch_via_mirrors
 from core.youtube.session_verify import YouTubeSessionVerify
+from core.youtube.ytdlp_fallback import fetch_via_ytdlp
 from utils.rate_limit import QuietRateLimiter
 
 logger = logging.getLogger(__name__)
@@ -653,23 +655,64 @@ class YouTubeFetcher:
 
         return self._finalize_player(player, video_id, canonical)
 
+    async def _fetch_external_fallback(
+        self,
+        video_id: str,
+        canonical: str,
+    ) -> dict[str, Any] | None:
+        cookies = (
+            self._request_cookies(use_auth=True)
+            if self.auth.is_configured()
+            else None
+        )
+        player = await fetch_via_ytdlp(
+            video_id,
+            canonical,
+            cookies=cookies,
+        )
+        if player and self._player_ok(player):
+            logger.info("youtube fallback: yt-dlp OK")
+            return player
+
+        session = await self._get_session()
+        player = await fetch_via_mirrors(session, video_id)
+        if player and self._player_ok(player):
+            logger.info("youtube fallback: mirror OK (%s)", player.get("_client"))
+            return player
+        return None
+
     async def fetch_source_player(self, video_id: str) -> dict[str, Any]:
-        """Исходные потоки — с автообновлением cookies и повтором."""
+        """Исходные потоки — InnerTube, затем yt-dlp / mirror."""
         await self.ensure_session()
-        try:
-            return await self._fetch_source_player_once(video_id)
-        except ValueError:
-            if not self.auth.is_configured():
-                raise
-            logger.info("youtube: refresh cookies and retry")
-            if self._auth_refresh_callback:
-                await self._auth_refresh_callback()
-            else:
-                await self.bootstrap_auth_session(force=True)
+        canonical = YouTubeLinkResolver.watch_url(video_id)
+        last_error: ValueError | None = None
+
+        for attempt in range(2):
             try:
                 return await self._fetch_source_player_once(video_id)
-            except ValueError:
-                raise
+            except ValueError as exc:
+                last_error = exc
+            except Exception as exc:
+                logger.warning("youtube innertube pass failed: %s", exc)
+                last_error = ValueError(str(exc))
+            if attempt == 0 and self.auth.is_configured():
+                logger.info("youtube: refresh cookies and retry")
+                if self._auth_refresh_callback:
+                    await self._auth_refresh_callback()
+                else:
+                    await self.bootstrap_auth_session(force=True)
+
+        fallback = await self._fetch_external_fallback(video_id, canonical)
+        if fallback:
+            return self._finalize_player(fallback, video_id, canonical)
+
+        hint = (
+            " InnerTube и cookies не сработали; yt-dlp/mirror тоже недоступны."
+            + self._auth_hint()
+        )
+        if last_error:
+            raise ValueError(str(last_error) + hint) from last_error
+        raise ValueError("Не удалось получить видео YouTube." + hint)
 
     async def verify_session(
         self,
