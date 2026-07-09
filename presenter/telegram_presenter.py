@@ -19,6 +19,7 @@ from aiogram.types import (
 
 from core.models import ArchiveBundle, EntityType, MediaAsset
 from core.platforms import Platform
+from core.source_quality import filter_download_candidates
 from core.tiktok.cdn_urls import sort_download_urls
 from core.tiktok.hq_meta import build_hq_downloads as build_tiktok_hq_downloads
 from core.profile_adapter import (
@@ -53,7 +54,7 @@ class TelegramPresenter:
         "prof": "Профиль автора",
         "aud": "Звук",
         "vid": "Видео полностью",
-        "hq": "Макс. качество",
+        "hq": "Исходное видео",
     }
 
     STAT_LABELS = {
@@ -419,7 +420,7 @@ class TelegramPresenter:
     def _iter_tiktok_video_urls(
         asset: MediaAsset,
         *,
-        prefer_hd: bool = False,
+        prefer_hd: bool = True,
     ) -> list[str]:
         extra = asset.extra
         seen: set[str] = set()
@@ -430,23 +431,19 @@ class TelegramPresenter:
                 seen.add(url)
                 urls.append(url)
 
-        if prefer_hd:
-            flat_keys = ("hdplay", "play", "wmplay", "hq_best_url", "video_url_best")
-        else:
-            flat_keys = ("play", "wmplay", "hdplay", "hq_best_url", "video_url_best")
-
-        for key in flat_keys:
-            val = extra.get(key)
-            if isinstance(val, str):
-                add(val)
-
-        entries = list(extra.get("hq_downloads") or [])
-        if not prefer_hd:
-            for entry in entries:
-                if entry.get("source") in ("play", "watermark") and entry.get("url"):
-                    add(entry["url"])
+        entries = filter_download_candidates(
+            list(extra.get("hq_downloads") or []),
+            source_only=prefer_hd,
+        )
         for entry in entries:
             add(entry.get("url"))
+
+        if prefer_hd:
+            for key in ("hdplay", "hq_best_url", "video_url_best"):
+                add(extra.get(key))
+        else:
+            for key in ("hdplay", "play", "wmplay", "hq_best_url", "video_url_best"):
+                add(extra.get(key))
 
         add(asset.url)
         return sort_download_urls(urls)
@@ -485,7 +482,7 @@ class TelegramPresenter:
     def _iter_youtube_video_urls(
         asset: MediaAsset,
         *,
-        prefer_hd: bool = False,
+        prefer_hd: bool = True,
     ) -> list[str]:
         extra = asset.extra
         seen: set[str] = set()
@@ -496,18 +493,17 @@ class TelegramPresenter:
                 seen.add(url)
                 urls.append(url)
 
-        if prefer_hd:
-            flat_keys = ("hq_best_url", "video_url_best")
-        else:
-            flat_keys = ("hq_best_url", "video_url_best")
-        for key in flat_keys:
-            val = extra.get(key)
-            if isinstance(val, str):
-                add(val)
-        for entry in extra.get("hq_downloads") or []:
+        entries = filter_download_candidates(
+            list(extra.get("hq_downloads") or []),
+            source_only=prefer_hd,
+        )
+        for entry in entries:
             if entry.get("source") == "audio":
                 continue
             add(entry.get("url"))
+
+        for key in ("hq_best_url", "video_url_best"):
+            add(extra.get(key))
         add(asset.url)
         return urls
 
@@ -587,7 +583,7 @@ class TelegramPresenter:
         *,
         label: str = "preview_video",
         max_bytes: int = 48 * 1024 * 1024,
-        prefer_hd: bool = False,
+        prefer_hd: bool = True,
     ) -> bytes | None:
         platform = self._bundle_platform(bundle)
         if platform == Platform.TIKTOK:
@@ -1340,7 +1336,7 @@ class TelegramPresenter:
                         callback_data=f"{prefix}:vid:{eid}",
                     ),
                     InlineKeyboardButton(
-                        text="HD загрузка",
+                        text="Исходное видео",
                         callback_data=f"{prefix}:hq:{eid}",
                     ),
                 ],
@@ -1377,7 +1373,7 @@ class TelegramPresenter:
                         callback_data=f"{prefix}:aud:{eid}",
                     ),
                     InlineKeyboardButton(
-                        text="HD загрузка",
+                        text="Исходное видео",
                         callback_data=f"{prefix}:hq:{eid}",
                     ),
                 ],

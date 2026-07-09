@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 from typing import Any
 from urllib.parse import urlparse
 
+from core.source_quality import pick_source_best, source_type_rank
 from core.video_meta import extract_video_versions, pick_best_version
 from utils.dict_utils import safe_dict
 
@@ -112,7 +113,7 @@ def parse_video_dash_manifest(manifest: str) -> list[dict[str, Any]]:
                     ),
                     "codec": rep.get("codecs") or rep.get("mimeType"),
                     "bandwidth_bps": int(rep.get("bandwidth") or 0) or None,
-                    "source": "dash",
+                    "source": "source",
                     "id": rep.get("id"),
                 })
     except ET.ParseError:
@@ -127,7 +128,7 @@ def parse_video_dash_manifest(manifest: str) -> list[dict[str, Any]]:
                     "url": url,
                     "width": int(match.group(1)),
                     "height": int(match.group(2)),
-                    "source": "dash",
+                    "source": "source",
                 })
 
     tracks.sort(key=lambda t: _pixels(t), reverse=True)
@@ -159,7 +160,7 @@ def build_hq_downloads(node: dict[str, Any]) -> dict[str, Any]:
     seen_urls: set[str] = set()
 
     for v in extract_video_versions(node):
-        item = _entry_from_version(v, "progressive")
+        item = _entry_from_version(v, "source")
         if item and item["url"] not in seen_urls:
             seen_urls.add(item["url"])
             entries.append(item)
@@ -191,13 +192,14 @@ def build_hq_downloads(node: dict[str, Any]) -> dict[str, Any]:
             "fps": dash.get("fps"),
             "codec": dash.get("codec"),
             "bandwidth_bps": dash.get("bandwidth_bps"),
-            "source": "dash",
+            "source": "source",
             "format": _guess_video_format(url),
             "label": f"{w}×{h} DASH" if w and h else "DASH",
         })
 
     entries.sort(
         key=lambda e: (
+            source_type_rank(e.get("source")),
             _pixels(e),
             e.get("bandwidth_bps") or 0,
         ),
@@ -205,7 +207,7 @@ def build_hq_downloads(node: dict[str, Any]) -> dict[str, Any]:
     )
 
     best_progressive = pick_best_version(extract_video_versions(node))
-    best_entry = entries[0] if entries else None
+    best_entry = pick_source_best(entries) or (entries[0] if entries else None)
 
     if best_progressive and best_entry:
         prog_px = (best_progressive.get("width") or 0) * (

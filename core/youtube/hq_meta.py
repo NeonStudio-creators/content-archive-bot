@@ -8,6 +8,8 @@ import re
 from typing import Any
 from urllib.parse import parse_qsl, unquote
 
+from core.source_quality import pick_source_best, source_type_rank
+
 
 def _format_url(fmt: dict[str, Any]) -> str | None:
     if fmt.get("url"):
@@ -57,18 +59,23 @@ def build_hq_downloads(player: dict[str, Any]) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    for fmt in streaming.get("formats") or []:
-        entry = _entry(fmt, source="progressive")
+    for fmt in streaming.get("adaptiveFormats") or []:
+        mime = (fmt.get("mimeType") or "").lower()
+        if "audio" in mime and "video" not in mime:
+            entry = _entry(fmt, source="audio")
+            if entry and entry["url"] not in seen:
+                seen.add(entry["url"])
+                entries.append(entry)
+            continue
+        if "video" not in mime:
+            continue
+        entry = _entry(fmt, source="source")
         if entry and entry["url"] not in seen:
             seen.add(entry["url"])
             entries.append(entry)
 
-    for fmt in streaming.get("adaptiveFormats") or []:
-        mime = (fmt.get("mimeType") or "").lower()
-        source = "audio" if "audio" in mime else "adaptive"
-        if "video" not in mime and source != "audio":
-            continue
-        entry = _entry(fmt, source=source)
+    for fmt in streaming.get("formats") or []:
+        entry = _entry(fmt, source="compressed")
         if entry and entry["url"] not in seen:
             seen.add(entry["url"])
             entries.append(entry)
@@ -76,6 +83,7 @@ def build_hq_downloads(player: dict[str, Any]) -> dict[str, Any]:
     video_entries = [e for e in entries if e.get("source") != "audio"]
     video_entries.sort(
         key=lambda e: (
+            source_type_rank(e.get("source")),
             (e.get("width") or 0) * (e.get("height") or 0),
             int(e.get("bitrate") or 0),
         ),
@@ -83,7 +91,9 @@ def build_hq_downloads(player: dict[str, Any]) -> dict[str, Any]:
     )
     entries = video_entries + [e for e in entries if e.get("source") == "audio"]
 
-    best = video_entries[0] if video_entries else (entries[0] if entries else None)
+    best = pick_source_best(video_entries) or (
+        video_entries[0] if video_entries else (entries[0] if entries else None)
+    )
     result: dict[str, Any] = {"hq_downloads": entries}
     if best:
         result["hq_best"] = best

@@ -23,6 +23,7 @@ from core.tiktok.audio_meta import extract_audio_sources
 from core.tiktok.auth import TikTokSessionAuthManager
 from core.tiktok.fetcher import TikTokFetcher
 from core.tiktok.resolver import TikTokLinkResolver
+from core.source_quality import filter_download_candidates, is_compressed_source
 from core.tiktok.cdn_urls import sort_download_urls
 from core.tiktok.hq_meta import build_hq_downloads as build_tiktok_hq, hq_filename as tiktok_hq_filename
 from core.tiktok.parser import TikTokParser
@@ -287,7 +288,10 @@ class ArchiveOrchestrator:
 
         asset = candidates_assets[0]
         extra = asset.extra
-        entries: list[dict[str, Any]] = list(extra.get("hq_downloads") or [])
+        entries = filter_download_candidates(
+            list(extra.get("hq_downloads") or []),
+            source_only=True,
+        )
         if not entries and extra.get("hq_best"):
             entries = [extra["hq_best"]]
         if not entries:
@@ -296,7 +300,7 @@ class ArchiveOrchestrator:
                 entries = [{"url": fallback, "source": "fallback"}]
 
         if not entries:
-            raise ValueError("Ссылки максимального качества недоступны")
+            raise ValueError("Исходное видео недоступно")
 
         base = (
             bundle.metadata.title
@@ -382,10 +386,10 @@ class ArchiveOrchestrator:
         video.extra.update(audio_info)
 
     @staticmethod
-    def _tiktok_video_url_candidates(
+    def _video_url_candidates_from_extra(
         video: MediaAsset,
         *,
-        prefer_hd: bool = True,
+        source_only: bool = True,
     ) -> list[str]:
         extra = video.extra
         seen: set[str] = set()
@@ -396,36 +400,40 @@ class ArchiveOrchestrator:
                 seen.add(url)
                 urls.append(url)
 
-        if prefer_hd:
-            flat_keys = ("hdplay", "play", "wmplay", "hq_best_url", "video_url_best")
-            source_order = ("hd", "bitrate", "play", "download", "play_addr", "watermark")
-        else:
-            flat_keys = ("play", "wmplay", "hdplay", "hq_best_url", "video_url_best")
-            source_order = ("play", "watermark", "hd", "bitrate", "download", "play_addr")
+        entries = filter_download_candidates(
+            list(extra.get("hq_downloads") or []),
+            source_only=source_only,
+        )
+        if not entries and extra.get("hq_best"):
+            entries = [extra["hq_best"]]
 
-        for key in flat_keys:
-            val = extra.get(key)
-            if isinstance(val, str):
-                add(val)
-
-        entries = list(extra.get("hq_downloads") or [])
-        if prefer_hd:
-            entries = sorted(
-                entries,
-                key=lambda e: (
-                    (e.get("width") or 0) * (e.get("height") or 0),
-                    e.get("size_bytes") or 0,
-                ),
-                reverse=True,
-            )
         for entry in entries:
-            src = entry.get("source")
-            if not prefer_hd and src not in source_order[:3]:
-                continue
             add(entry.get("url"))
 
-        add(video.url)
+        if source_only:
+            for key in ("hdplay", "hq_best_url", "video_url_best"):
+                add(extra.get(key))
+        else:
+            for key in ("hdplay", "play", "wmplay", "hq_best_url", "video_url_best"):
+                add(extra.get(key))
+
+        if not source_only or not is_compressed_source(
+            (entries[0] if entries else {}).get("source")
+        ):
+            add(video.url)
+
         return sort_download_urls(urls)
+
+    @staticmethod
+    def _tiktok_video_url_candidates(
+        video: MediaAsset,
+        *,
+        prefer_hd: bool = True,
+    ) -> list[str]:
+        return ArchiveOrchestrator._video_url_candidates_from_extra(
+            video,
+            source_only=prefer_hd,
+        )
 
     async def _refresh_tiktok_video_media(self, bundle: ArchiveBundle) -> bool:
         video = next((a for a in bundle.media if a.media_type == "video"), None)
@@ -469,8 +477,9 @@ class ArchiveOrchestrator:
         errors: list[str] = []
 
         for attempt in range(2):
-            entries: list[dict[str, Any]] = list(
-                video.extra.get("hq_downloads") or []
+            entries = filter_download_candidates(
+                list(video.extra.get("hq_downloads") or []),
+                source_only=True,
             )
             if not entries and video.extra.get("hq_best"):
                 entries = [video.extra["hq_best"]]
@@ -479,7 +488,7 @@ class ArchiveOrchestrator:
             if not entries:
                 if attempt == 0 and await self._refresh_tiktok_video_media(bundle):
                     continue
-                raise ValueError("Ссылки максимального качества недоступны")
+                raise ValueError("Исходное видео недоступно")
 
             urls = self._tiktok_video_url_candidates(video, prefer_hd=True)
             try:
@@ -622,9 +631,15 @@ class ArchiveOrchestrator:
             )
             return await self._collect_youtube_profile(profile_resolved)
 
-        player = await self.youtube_fetcher.fetch_video(url, video_id=video_id)
+        if mode in ("vid", "hq"):
+            player = await self.youtube_fetcher.fetch_source_player(video_id)
+        else:
+            player = await self.youtube_fetcher.fetch_video(url, video_id=video_id)
+
         if mode == "vid":
-            return self.youtube_parser.parse_video_deep(resolved, player)
+            bundle = self.youtube_parser.parse_video_deep(resolved, player)
+            await self._resolve_youtube_hq(bundle, player)
+            return bundle
 
         bundle = self.youtube_parser.parse_video_quick(resolved, player)
         if mode == "aud":
@@ -668,42 +683,10 @@ class ArchiveOrchestrator:
         *,
         prefer_hd: bool = True,
     ) -> list[str]:
-        extra = video.extra
-        seen: set[str] = set()
-        urls: list[str] = []
-
-        def add(url: str | None) -> None:
-            if url and url.startswith("http") and url not in seen:
-                seen.add(url)
-                urls.append(url)
-
-        keys = (
-            ("hq_best_url", "video_url_best", "play")
-            if prefer_hd
-            else ("play", "hq_best_url", "video_url_best")
+        return ArchiveOrchestrator._video_url_candidates_from_extra(
+            video,
+            source_only=prefer_hd,
         )
-        for key in keys:
-            val = extra.get(key)
-            if isinstance(val, str):
-                add(val)
-
-        entries = list(extra.get("hq_downloads") or [])
-        if prefer_hd:
-            entries = sorted(
-                entries,
-                key=lambda e: (
-                    0 if e.get("source") == "audio" else 1,
-                    (e.get("width") or 0) * (e.get("height") or 0),
-                    int(e.get("bitrate") or 0),
-                ),
-                reverse=True,
-            )
-        for entry in entries:
-            if entry.get("source") == "audio":
-                continue
-            add(entry.get("url"))
-        add(video.url)
-        return urls
 
     async def _download_youtube_hq(
         self, bundle: ArchiveBundle
@@ -712,18 +695,31 @@ class ArchiveOrchestrator:
         if not video:
             raise ValueError("Нет видео для загрузки")
 
+        video_id = bundle.metadata.entity_id or video.id
+        try:
+            player = await self.youtube_fetcher.fetch_source_player(video_id)
+            await self._resolve_youtube_hq(bundle, player)
+            video = next((a for a in bundle.media if a.media_type == "video"), None)
+        except Exception as exc:
+            logger.warning("youtube source refresh: %s", exc)
+
         base = (
             bundle.metadata.description
             or bundle.metadata.display_name
             or "youtube"
         )
-        entries: list[dict[str, Any]] = list(video.extra.get("hq_downloads") or [])
+        entries = filter_download_candidates(
+            list(video.extra.get("hq_downloads") or []),
+            source_only=True,
+        )
         if not entries and video.extra.get("hq_best"):
             entries = [video.extra["hq_best"]]
         if not entries and video.url:
             entries = [{"url": video.url, "source": "fallback"}]
         if not entries:
-            raise ValueError("Ссылки максимального качества недоступны")
+            raise ValueError(
+                "Исходное видео недоступно. Проверьте YOUTUBE_SESSION_TOKEN."
+            )
 
         urls = self._youtube_video_url_candidates(video, prefer_hd=True)
         data, size, used_url = await self.youtube_fetcher.download_from_urls(
@@ -828,7 +824,9 @@ class ArchiveOrchestrator:
             username=username,
         )
         if mode == "vid":
-            return self.tiktok_parser.parse_video_deep(resolved, item)
+            bundle = self.tiktok_parser.parse_video_deep(resolved, item)
+            await self._resolve_tiktok_hq(bundle, item)
+            return bundle
 
         bundle = self.tiktok_parser.parse_video_quick(resolved, item)
         if mode == "aud":

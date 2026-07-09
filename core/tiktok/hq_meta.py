@@ -7,6 +7,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from core.source_quality import pick_source_best, source_type_rank
 from core.tiktok.cdn_urls import download_url_rank
 from utils.dict_utils import safe_dict
 
@@ -44,10 +45,10 @@ def build_hq_downloads(item: dict[str, Any]) -> dict[str, Any]:
     height = video.get("height") or item.get("height")
 
     candidates = [
-        ("hdplay", item.get("hdplay"), item.get("hd_size"), "hd"),
-        ("play", item.get("play"), item.get("size"), "play"),
-        ("wmplay", item.get("wmplay"), item.get("wm_size"), "watermark"),
+        ("hdplay", item.get("hdplay"), item.get("hd_size"), "source"),
         ("downloadAddr", video.get("downloadAddr"), None, "download"),
+        ("play", item.get("play"), item.get("size"), "compressed"),
+        ("wmplay", item.get("wmplay"), item.get("wm_size"), "watermark"),
         ("playAddr", video.get("playAddr"), None, "play_addr"),
     ]
     for source, url, size, tag in candidates:
@@ -74,7 +75,7 @@ def build_hq_downloads(item: dict[str, Any]) -> dict[str, Any]:
             url = url_list[0] if url_list else play_addr.get("Uri")
         entry = _entry(
             url,
-            source="bitrate",
+            source="source",
             width=variant.get("Width") or variant.get("width"),
             height=variant.get("Height") or variant.get("height"),
             size_bytes=variant.get("DataSize") or variant.get("data_size"),
@@ -85,6 +86,7 @@ def build_hq_downloads(item: dict[str, Any]) -> dict[str, Any]:
 
     entries.sort(
         key=lambda e: (
+            source_type_rank(e.get("source")),
             download_url_rank(e.get("url") or ""),
             (e.get("width") or 0) * (e.get("height") or 0),
             e.get("size_bytes") or 0,
@@ -92,7 +94,7 @@ def build_hq_downloads(item: dict[str, Any]) -> dict[str, Any]:
         reverse=True,
     )
 
-    best = entries[0] if entries else None
+    best = pick_source_best(entries) or (entries[0] if entries else None)
     result: dict[str, Any] = {"hq_downloads": entries}
     if best:
         result["hq_best"] = best

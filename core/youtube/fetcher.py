@@ -14,6 +14,7 @@ import aiohttp
 from config import Settings
 from core.session_bootstrap import merge_cookies, parse_set_cookies
 from core.youtube.auth import YouTubeSessionAuthManager
+from core.youtube.hq_meta import _format_url
 from core.youtube.resolver import YouTubeLinkResolver
 from utils.rate_limit import QuietRateLimiter
 from utils.retry import with_retry
@@ -247,30 +248,68 @@ class YouTubeFetcher:
             "browse_id": browse_id if handle else resolved_channel_id,
         }
 
+    @staticmethod
+    def _stream_url_count(streaming: dict[str, Any] | None) -> int:
+        if not streaming:
+            return 0
+        total = 0
+        for fmt in (streaming.get("formats") or []) + (
+            streaming.get("adaptiveFormats") or []
+        ):
+            if _format_url(fmt):
+                total += 1
+        return total
+
+    @staticmethod
+    def _merge_player_data(
+        primary: dict[str, Any],
+        secondary: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Объединяет streamingData — берём потоки с большим числом прямых URL."""
+        merged = dict(primary)
+        p_stream = primary.get("streamingData") or {}
+        s_stream = secondary.get("streamingData") or {}
+        if YouTubeFetcher._stream_url_count(s_stream) > YouTubeFetcher._stream_url_count(
+            p_stream
+        ):
+            merged["streamingData"] = s_stream
+        for key in ("videoDetails", "playabilityStatus", "microformat"):
+            if not merged.get(key) and secondary.get(key):
+                merged[key] = secondary[key]
+        return merged
+
+    async def fetch_source_player(self, video_id: str) -> dict[str, Any]:
+        """Исходные потоки (adaptive/hd) — InnerTube с cookies + HTML."""
+        canonical = YouTubeLinkResolver.watch_url(video_id)
+        html_player = await self.fetch_player_via_html(video_id)
+        player: dict[str, Any] | None = html_player
+
+        if self.auth.is_configured():
+            try:
+                api_player = await self.fetch_player(video_id, referer=canonical)
+                if html_player:
+                    player = self._merge_player_data(api_player, html_player)
+                else:
+                    player = api_player
+                player["_source"] = "innertube+html"
+            except Exception as exc:
+                logger.warning("youtube source innertube: %s", exc)
+
+        if not player:
+            player = await self.fetch_player(video_id, referer=canonical)
+            player["_source"] = player.get("_client", "innertube")
+        elif not player.get("_source"):
+            player["_source"] = "html"
+
+        player["_video_id"] = video_id
+        player["_canonical_url"] = canonical
+        return player
+
     async def fetch_video(self, url: str, *, video_id: str | None = None) -> dict[str, Any]:
         vid = video_id or YouTubeLinkResolver.extract_video_id(url)
         if not vid:
             raise ValueError("Не удалось извлечь ID видео YouTube")
-        canonical = YouTubeLinkResolver.watch_url(vid)
-
-        player = await self.fetch_player_via_html(vid)
-        if player:
-            streaming = player.get("streamingData") or {}
-            has_streams = bool(
-                streaming.get("formats") or streaming.get("adaptiveFormats")
-            )
-            status = (player.get("playabilityStatus") or {}).get("status")
-            if has_streams or status == "OK":
-                player["_source"] = "html"
-                player["_video_id"] = vid
-                player["_canonical_url"] = canonical
-                return player
-
-        player = await self.fetch_player(vid, referer=canonical)
-        player["_source"] = player.get("_client", "innertube")
-        player["_video_id"] = vid
-        player["_canonical_url"] = canonical
-        return player
+        return await self.fetch_source_player(vid)
 
     def _cdn_download_attempts(
         self,
