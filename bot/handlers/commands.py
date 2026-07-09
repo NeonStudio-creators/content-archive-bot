@@ -79,16 +79,42 @@ HELP_TEXT = """
 def setup_commands(orchestrator: ArchiveOrchestrator) -> Router:
     @router.message(Command("session"))
     async def cmd_session(message: Message) -> None:
-        await orchestrator.fetcher.ensure_session()
-        csrf = orchestrator.auth.get_csrf_token()
         tt_csrf = orchestrator.tiktok_auth.get_csrf_token()
         yt_cookies = orchestrator.youtube_auth.build_cookies()
         lines = [
             "<b>ContentExplorer</b> · Проверка сессии",
             "",
             "<b>Instagram</b>",
-            f"SESSION_TOKEN · {'OK' if orchestrator.auth.session_id else 'нет'}",
-            f"CSRF_TOKEN · {'OK' if csrf else 'нет — добавьте в Railway'}",
+        ]
+        try:
+            ig = await orchestrator.fetcher.verify_instagram_session()
+            lines.extend([
+                f"SESSION_TOKEN · {'OK' if ig.session_id_ok else 'нет'}",
+                f"CSRF_TOKEN · {'OK' if ig.csrf_ok else 'нет — добавьте в Railway'}",
+                f"Bootstrap · csrftoken "
+                f"{'OK' if ig.csrf_ok else 'MISSING'} ({ig.csrf_source})",
+            ])
+            if ig.ok:
+                lines.append(
+                    f"Тест API · OK (@{ig.profile_username}) · {ig.strategy}"
+                )
+            else:
+                lines.append("Тест API · не удалось")
+                if not ig.csrf_ok:
+                    lines.append(
+                        "  · обновите SESSION_TOKEN и CSRF_TOKEN "
+                        "из одного браузера (F12 → Cookies → instagram.com)"
+                    )
+                for err in ig.errors[:4]:
+                    lines.append(f"  · {err}")
+                if len(ig.errors) > 4:
+                    lines.append(f"  · … ещё {len(ig.errors) - 4} ошибок")
+        except Exception as exc:
+            lines.extend([
+                f"SESSION_TOKEN · {'OK' if orchestrator.auth.session_id else 'нет'}",
+                f"Тест API · ошибка: {exc}",
+            ])
+        lines.extend([
             "",
             "<b>TikTok</b>",
             f"TIKTOK_SESSION_TOKEN · {'OK' if orchestrator.tiktok_auth.session_id else 'нет'}",
@@ -97,24 +123,7 @@ def setup_commands(orchestrator: ArchiveOrchestrator) -> Router:
             "<b>YouTube</b>",
             f"YOUTUBE_SESSION_TOKEN · {'OK' if orchestrator.youtube_auth.is_configured() else 'нет'}",
             f"Cookies · {len(yt_cookies)} шт.",
-        ]
-        try:
-            data = await orchestrator.fetcher._fetch_profile_via_web_api(
-                "instagram",
-                orchestrator.fetcher._profile_referer("instagram"),
-            )
-            if data:
-                user = data.get("data", {}).get("user", {})
-                lines.append(
-                    f"Тест API · OK (@{user.get('username', 'instagram')})"
-                )
-            else:
-                lines.append(
-                    "Тест API · web_profile_info не ответил — "
-                    "проверьте SESSION_TOKEN и CSRF_TOKEN"
-                )
-        except Exception as exc:
-            lines.append(f"Тест API · ошибка: {exc}")
+        ])
         await message.answer("\n".join(lines), parse_mode="HTML")
 
     return router

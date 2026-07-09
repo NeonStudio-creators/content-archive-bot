@@ -8,8 +8,8 @@ import asyncio
 import json
 import logging
 import re
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
 import aiohttp
@@ -209,6 +209,22 @@ class LinkResolver:
 
 
 @dataclass
+@dataclass
+class InstagramSessionVerify:
+    """Результат проверки Instagram-сессии (/session)."""
+
+    session_id_ok: bool
+    csrf_ok: bool
+    csrf_source: str
+    strategy: str | None = None
+    profile_username: str | None = None
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return self.strategy is not None
+
+
 class GraphQLFetcher:
     """
     Выполняет GraphQL-запросы к внутреннему API платформы.
@@ -718,9 +734,21 @@ class GraphQLFetcher:
             "__relay_internal__pv__PolarisRepostsConsumptionEnabledrelayprovider": False,
         }
 
-    async def _fetch_profile_via_web_api(
+    def _csrf_source_label(self) -> str:
+        if self.settings.csrf_token:
+            return "Railway (CSRF_TOKEN)"
+        if self.auth._runtime_cookies.get("csrftoken"):
+            return "bootstrap instagram.com"
+        return "нет"
+
+    async def _probe_web_profile_info(
         self, username: str, referer: str
-    ) -> dict[str, Any] | None:
+    ) -> tuple[dict[str, Any] | None, str]:
+        """web_profile_info с текстом ошибки для диагностики."""
+        if not self.auth.session_id:
+            return None, "sessionid не задан (SESSION_TOKEN)"
+        if not self.auth.get_csrf_token():
+            return None, "csrftoken отсутствует — добавьте CSRF_TOKEN в Railway"
         try:
             await self.rate_limiter.wait()
             session = await self._get_session()
@@ -734,26 +762,100 @@ class GraphQLFetcher:
             ) as resp:
                 body = await resp.text()
                 if resp.status >= 400:
-                    logger.warning(
-                        "profile_web_api: HTTP %s — %s",
-                        resp.status,
-                        body[:300],
-                    )
-                    return None
+                    return None, f"HTTP {resp.status}: {body[:200]}"
                 payload = json.loads(body)
             if not isinstance(payload, dict):
-                return None
+                return None, "невалидный JSON"
             if payload.get("status") == "fail":
-                msg = str(payload.get("message", ""))
-                logger.warning("profile web API: %s", msg)
-                return None
+                msg = str(payload.get("message") or "fail")
+                return None, f"API: {msg}"
             result = from_web_profile_info(payload)
             if result:
-                logger.info("profile: web API OK для %s", username)
-                return result
+                return result, ""
+            return None, "пустой user в ответе"
         except Exception as exc:
-            logger.warning("profile web API failed для %s: %s", username, exc)
+            return None, str(exc)
+
+    async def _fetch_profile_via_web_api(
+        self, username: str, referer: str
+    ) -> dict[str, Any] | None:
+        result, err = await self._probe_web_profile_info(username, referer)
+        if result:
+            logger.info("profile: web API OK для %s", username)
+            return result
+        if err:
+            logger.warning("profile web API failed для %s: %s", username, err)
         return None
+
+    async def _try_profile_strategy(
+        self,
+        label: str,
+        strategy: Callable[[str, str], Awaitable[dict[str, Any] | None]],
+        username: str,
+        referer: str,
+    ) -> tuple[dict[str, Any] | None, str]:
+        try:
+            result = await strategy(username, referer)
+            if result:
+                return result, ""
+            return None, "пустой ответ"
+        except Exception as exc:
+            return None, str(exc)
+
+    @staticmethod
+    def _profile_username_from_data(data: dict[str, Any]) -> str | None:
+        user = dig(data, "data", "user")
+        if isinstance(user, dict):
+            return user.get("username")
+        return None
+
+    async def verify_instagram_session(
+        self, username: str = "instagram"
+    ) -> InstagramSessionVerify:
+        """
+        Проверка сессии — тот же каскад, что fetch_web_profile, с деталями ошибок.
+        """
+        self._session_ready = False
+        await self.ensure_session()
+        referer = self._profile_referer(username)
+        csrf = self.auth.get_csrf_token()
+        verify = InstagramSessionVerify(
+            session_id_ok=bool(self.auth.session_id),
+            csrf_ok=bool(csrf),
+            csrf_source=self._csrf_source_label(),
+        )
+
+        strategies: list[tuple[str, Callable[[str, str], Awaitable[dict[str, Any] | None]]]] = [
+            ("web_profile_info", self._fetch_profile_via_web_api),
+            ("mobile web_profile_info", self._fetch_profile_via_mobile),
+            ("usernameinfo", self._fetch_profile_via_usernameinfo),
+            ("Polaris GraphQL", self._fetch_profile_via_gql_polaris),
+            ("legacy GraphQL", self._fetch_profile_via_gql_legacy),
+            ("HTML", self._fetch_profile_via_html),
+        ]
+
+        probe, web_err = await self._probe_web_profile_info(username, referer)
+        if probe:
+            verify.strategy = "web_profile_info"
+            verify.profile_username = self._profile_username_from_data(probe) or username
+            return verify
+        if web_err:
+            verify.errors.append(f"web_profile_info: {web_err}")
+
+        for label, strategy in strategies[1:]:
+            result, err = await self._try_profile_strategy(
+                label, strategy, username, referer
+            )
+            if result:
+                verify.strategy = label
+                verify.profile_username = (
+                    self._profile_username_from_data(result) or username
+                )
+                return verify
+            if err:
+                verify.errors.append(f"{label}: {err}")
+
+        return verify
 
     async def _fetch_profile_via_mobile(
         self, username: str, referer: str
