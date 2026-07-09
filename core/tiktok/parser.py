@@ -150,6 +150,10 @@ class TikTokParser:
         preview_url = mirror_item.get("play") or mirror_item.get("hdplay") or cover or ""
         extra = build_hq_downloads(mirror_item)
         extra.update(extract_audio_sources(mirror_item))
+        for key in ("play", "hdplay", "wmplay", "cover"):
+            val = mirror_item.get(key)
+            if isinstance(val, str) and val.startswith("http"):
+                extra[key] = val
         extra["source"] = source
         if deep:
             extra["deep_collected"] = True

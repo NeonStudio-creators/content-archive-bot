@@ -81,32 +81,34 @@ def setup_callbacks(
                     filename,
                 )
             elif mode == "hq":
-                try:
-                    if platform == Platform.TIKTOK:
-                        file_bytes, filename, meta = (
-                            await orchestrator.download_publication_hq(
-                                bundle, platform=Platform.TIKTOK
-                            )
-                        )
-                    else:
+                if platform == Platform.TIKTOK:
+                    await presenter.deliver_hq_video(
+                        callback.message,
+                        bundle,
+                        download_hq=lambda b: orchestrator.download_publication_hq(
+                            b, platform=Platform.TIKTOK
+                        ),
+                    )
+                else:
+                    try:
                         file_bytes, filename, meta = (
                             await orchestrator.download_publication_hq(bundle)
                         )
-                    await presenter.send_hq_report(
-                        callback.message,
-                        bundle,
-                        file_bytes,
-                        filename,
-                        delivered=meta,
-                    )
-                except ValueError as exc:
-                    await presenter.send_deep_report(
-                        callback.message.bot,
-                        callback.message,
-                        bundle,
-                        mode,
-                        notice=str(exc),
-                    )
+                        await presenter.send_hq_report(
+                            callback.message,
+                            bundle,
+                            file_bytes,
+                            filename,
+                            delivered=meta,
+                        )
+                    except ValueError as exc:
+                        await presenter.send_deep_report(
+                            callback.message.bot,
+                            callback.message,
+                            bundle,
+                            mode,
+                            notice=str(exc),
+                        )
             else:
                 await presenter.send_deep_report(
                     callback.message.bot,

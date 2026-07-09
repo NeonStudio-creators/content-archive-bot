@@ -19,6 +19,7 @@ from aiogram.types import (
 
 from core.models import ArchiveBundle, EntityType, MediaAsset
 from core.platforms import Platform
+from core.tiktok.hq_meta import build_hq_downloads as build_tiktok_hq_downloads
 from core.profile_adapter import (
     extract_avatar_from_profile_payload,
     extract_avatar_url,
@@ -400,17 +401,111 @@ class TelegramPresenter:
         first.url = self._normalize_media_url(first.url) or first.url
         return first
 
-    def _tiktok_playback_url(self, asset: MediaAsset) -> str:
-        """Прямая ссылка на воспроизведение (не HD) — быстрее для превью."""
+    @staticmethod
+    def _iter_tiktok_video_urls(
+        asset: MediaAsset,
+        *,
+        prefer_hd: bool = False,
+    ) -> list[str]:
         extra = asset.extra
-        for entry in extra.get("hq_downloads") or []:
-            if entry.get("source") in ("play", "watermark") and entry.get("url"):
-                return entry["url"]
-        for key in ("play", "wmplay", "hq_best_url", "video_url_best"):
-            url = extra.get(key)
-            if isinstance(url, str) and url.startswith("http"):
-                return url
-        return asset.url
+        seen: set[str] = set()
+        urls: list[str] = []
+
+        def add(url: str | None) -> None:
+            if url and url.startswith("http") and url not in seen:
+                seen.add(url)
+                urls.append(url)
+
+        if prefer_hd:
+            flat_keys = ("hdplay", "play", "wmplay", "hq_best_url", "video_url_best")
+        else:
+            flat_keys = ("play", "wmplay", "hdplay", "hq_best_url", "video_url_best")
+
+        for key in flat_keys:
+            val = extra.get(key)
+            if isinstance(val, str):
+                add(val)
+
+        entries = list(extra.get("hq_downloads") or [])
+        if not prefer_hd:
+            for entry in entries:
+                if entry.get("source") in ("play", "watermark") and entry.get("url"):
+                    add(entry["url"])
+        for entry in entries:
+            add(entry.get("url"))
+
+        add(asset.url)
+        return urls
+
+    async def _refresh_tiktok_asset_urls(
+        self,
+        bundle: ArchiveBundle,
+        asset: MediaAsset,
+    ) -> bool:
+        if not self.tiktok_fetcher:
+            return False
+        video_id = bundle.metadata.entity_id or asset.id
+        username = bundle.metadata.username
+        try:
+            item = await self.tiktok_fetcher.refresh_mirror_item(
+                bundle.source_url,
+                video_id=video_id,
+                username=username,
+            )
+        except Exception as exc:
+            logger.warning("TT mirror refresh: %s", exc)
+            return False
+
+        hq = build_tiktok_hq_downloads(item)
+        asset.extra.update(hq)
+        for key in ("play", "hdplay", "wmplay", "cover"):
+            val = item.get(key)
+            if isinstance(val, str) and val.startswith("http"):
+                asset.extra[key] = val
+        best = hq.get("hq_best_url")
+        if best:
+            asset.url = best
+        return True
+
+    async def _download_tiktok_video_bytes(
+        self,
+        bundle: ArchiveBundle,
+        asset: MediaAsset,
+        *,
+        label: str = "preview_video",
+        max_bytes: int = 48 * 1024 * 1024,
+        prefer_hd: bool = False,
+    ) -> bytes | None:
+        if not self.tiktok_fetcher:
+            return None
+        referer = bundle.source_url or self._base_url(bundle)
+
+        for attempt in range(2):
+            urls = self._iter_tiktok_video_urls(asset, prefer_hd=prefer_hd)
+            if not urls:
+                if attempt == 0 and await self._refresh_tiktok_asset_urls(
+                    bundle, asset
+                ):
+                    continue
+                return None
+            try:
+                data, _, _ = await self.tiktok_fetcher.download_from_urls(
+                    urls,
+                    referer=referer,
+                    label=label,
+                    max_bytes=max_bytes,
+                )
+                return data
+            except ValueError as exc:
+                logger.warning("%s: %s", label, exc)
+                return None
+            except Exception as exc:
+                logger.warning("%s download failed: %s", label, exc)
+                if attempt == 0 and await self._refresh_tiktok_asset_urls(
+                    bundle, asset
+                ):
+                    continue
+        return None
 
     async def _download_video_bytes(
         self,
@@ -419,28 +514,24 @@ class TelegramPresenter:
         *,
         label: str = "preview_video",
         max_bytes: int = 48 * 1024 * 1024,
+        prefer_hd: bool = False,
     ) -> bytes | None:
         platform = self._bundle_platform(bundle)
-        url = (
-            self._tiktok_playback_url(asset)
-            if platform == Platform.TIKTOK
-            else asset.url
-        )
-        if not url or not url.startswith("http"):
+        if platform == Platform.TIKTOK:
+            return await self._download_tiktok_video_bytes(
+                bundle,
+                asset,
+                label=label,
+                max_bytes=max_bytes,
+                prefer_hd=prefer_hd,
+            )
+        if not asset.url or not asset.url.startswith("http"):
             return None
         referer = bundle.source_url or self._base_url(bundle)
         try:
-            if platform == Platform.TIKTOK and self.tiktok_fetcher:
-                data, _ = await self.tiktok_fetcher.download_media_bytes(
-                    url,
-                    referer=referer,
-                    label=label,
-                    max_bytes=max_bytes,
-                )
-                return data
             if self.fetcher:
                 return await self.fetcher.download_media_bytes(
-                    url,
+                    asset.url,
                     referer=referer,
                     label=label,
                     max_bytes=max_bytes,
@@ -1604,6 +1695,58 @@ class TelegramPresenter:
             caption=safe_caption,
             parse_mode="HTML",
         )
+
+    async def deliver_hq_video(
+        self,
+        message: Message,
+        bundle: ArchiveBundle,
+        *,
+        download_hq: object | None = None,
+    ) -> bool:
+        """Скачивает и отправляет видео HQ; при ошибке — текст со ссылками."""
+        file_bytes: bytes | None = None
+        filename = "tiktok_hq.mp4"
+        meta: dict | None = None
+        notice: str | None = None
+
+        if download_hq:
+            try:
+                file_bytes, filename, meta = await download_hq(bundle)
+            except ValueError as exc:
+                notice = str(exc)
+
+        if not file_bytes and self._bundle_platform(bundle) == Platform.TIKTOK:
+            video = next(
+                (a for a in bundle.media if a.media_type == "video"), None
+            )
+            if video:
+                file_bytes = await self._download_tiktok_video_bytes(
+                    bundle,
+                    video,
+                    label="hq_fallback",
+                    prefer_hd=True,
+                )
+                if file_bytes:
+                    meta = {"size_bytes": len(file_bytes)}
+
+        if file_bytes:
+            await self.send_hq_report(
+                message,
+                bundle,
+                file_bytes,
+                filename,
+                delivered=meta,
+            )
+            return True
+
+        await self.send_deep_report(
+            message.bot,
+            message,
+            bundle,
+            "hq",
+            notice=notice or "Не удалось скачать файл",
+        )
+        return False
 
     async def send_hq_report(
         self,

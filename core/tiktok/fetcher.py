@@ -399,6 +399,54 @@ class TikTokFetcher:
         )
         return data
 
+    def _cdn_download_attempts(
+        self,
+        referer: str | None = None,
+    ) -> list[tuple[dict[str, str], dict[str, str] | None]]:
+        """CDN TikTok часто отклоняет запросы с sessionid — пробуем без cookies."""
+        ref = referer or f"{self.settings.tiktok_base_url}/"
+        return [
+            (
+                {
+                    "User-Agent": self.settings.user_agent,
+                    "Accept": "*/*",
+                    "Referer": ref,
+                },
+                None,
+            ),
+            (
+                {
+                    "User-Agent": self.settings.user_agent,
+                    "Accept": "*/*",
+                },
+                None,
+            ),
+            (
+                self.auth.build_headers(referer=ref, accept="*/*"),
+                None,
+            ),
+            (
+                self.auth.build_headers(referer=ref, accept="*/*"),
+                self.auth.build_cookies(),
+            ),
+        ]
+
+    @staticmethod
+    def _looks_like_media(data: bytes) -> bool:
+        if len(data) < 256:
+            return False
+        if data[:1] == b"<":
+            return False
+        if data[:4] == b"ftyp" or data[4:8] == b"ftyp":
+            return True
+        if data[:3] == b"ID3" or data[:2] == b"\xff\xfb":
+            return True
+        if data[:2] == b"\xff\xd8":
+            return True
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            return True
+        return len(data) >= 4096
+
     async def download_media_bytes(
         self,
         url: str,
@@ -409,33 +457,105 @@ class TikTokFetcher:
     ) -> tuple[bytes, int]:
         await self.rate_limiter.wait()
         session = await self._get_session()
-        ref = referer or f"{self.settings.tiktok_base_url}/"
-        kw = self._request_kwargs(referer=ref, accept="*/*")
+        last_error: Exception | None = None
 
-        async with session.get(url, allow_redirects=True, **kw) as resp:
-            if resp.status >= 400:
-                raise ValueError(f"Скачивание HTTP {resp.status}")
+        for headers, cookies in self._cdn_download_attempts(referer):
+            try:
+                async with session.get(
+                    url,
+                    headers=headers,
+                    cookies=cookies,
+                    allow_redirects=True,
+                ) as resp:
+                    if resp.status >= 400:
+                        logger.warning(
+                            "%s: HTTP %s for %s",
+                            label,
+                            resp.status,
+                            url[:80],
+                        )
+                        continue
 
-            cl_header = resp.headers.get("Content-Length")
-            if cl_header and int(cl_header) > max_bytes:
-                mb = int(cl_header) / (1024 * 1024)
-                raise ValueError(
-                    f"Файл слишком большой ({mb:.1f} МБ). "
-                    f"Лимит Telegram — {max_bytes // (1024 * 1024)} МБ."
+                    cl_header = resp.headers.get("Content-Length")
+                    if cl_header and int(cl_header) > max_bytes:
+                        mb = int(cl_header) / (1024 * 1024)
+                        raise ValueError(
+                            f"Файл слишком большой ({mb:.1f} МБ). "
+                            f"Лимит Telegram — {max_bytes // (1024 * 1024)} МБ."
+                        )
+
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in resp.content.iter_chunked(262_144):
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise ValueError("Файл слишком большой для Telegram")
+                        chunks.append(chunk)
+
+                    data = b"".join(chunks)
+                    if not self._looks_like_media(data):
+                        logger.warning(
+                            "%s: ответ не похож на медиа (%s байт)",
+                            label,
+                            len(data),
+                        )
+                        continue
+                    return data, total
+            except ValueError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                logger.warning("%s attempt failed: %s", label, exc)
+
+        if last_error:
+            raise last_error
+        raise ValueError(f"Не удалось скачать: {url[:80]}")
+
+    async def download_from_urls(
+        self,
+        urls: list[str],
+        *,
+        referer: str | None = None,
+        label: str = "tiktok_media",
+        max_bytes: int = 48 * 1024 * 1024,
+    ) -> tuple[bytes, int, str]:
+        """Пробует список CDN-URL по очереди."""
+        errors: list[str] = []
+        for url in urls:
+            if not url or not str(url).startswith("http"):
+                continue
+            try:
+                data, size = await self.download_media_bytes(
+                    url,
+                    referer=referer,
+                    label=label,
+                    max_bytes=max_bytes,
                 )
+                return data, size, url
+            except ValueError:
+                raise
+            except Exception as exc:
+                errors.append(f"{url[:60]}: {exc}")
+                logger.warning("%s candidate failed: %s", label, exc)
 
-            chunks: list[bytes] = []
-            total = 0
-            async for chunk in resp.content.iter_chunked(262_144):
-                total += len(chunk)
-                if total > max_bytes:
-                    raise ValueError("Файл слишком большой для Telegram")
-                chunks.append(chunk)
+        raise ValueError(
+            "Не удалось скачать файл. "
+            + ("; ".join(errors[:3]) if errors else "нет URL")
+        )
 
-            data = b"".join(chunks)
-            if len(data) < 256:
-                raise ValueError("Пустой файл при скачивании")
-            return data, total
+    async def refresh_mirror_item(
+        self,
+        url: str,
+        *,
+        video_id: str | None = None,
+        username: str | None = None,
+    ) -> dict[str, Any]:
+        """Свежие play/hdplay URL через mirror (старые CDN-ссылки быстро протухают)."""
+        return await self.fetch_video_mirror(
+            url,
+            video_id=video_id,
+            username=username,
+        )
 
     async def download_image_bytes(
         self,
