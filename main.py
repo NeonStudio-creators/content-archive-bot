@@ -16,7 +16,7 @@ import sys
 from aiogram.exceptions import TelegramAPIError, TelegramUnauthorizedError
 
 from bot.app import create_bot, register_shutdown, register_startup
-from config import Settings, log_config_status
+from config import Settings, log_config_status, secrets_hint
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,7 +34,8 @@ async def main() -> None:
     except ValueError as exc:
         logger.error("Ошибка конфигурации: %s", exc)
         logger.error(
-            "Задайте Variables в панели деплоя: TELEGRAM_BOT_TOKEN, SESSION_TOKEN"
+            "Задайте TELEGRAM_BOT_TOKEN и SESSION_TOKEN в %s",
+            secrets_hint(),
         )
         sys.exit(1)
 

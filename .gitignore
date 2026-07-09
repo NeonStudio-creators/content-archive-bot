@@ -21,6 +21,7 @@ venv/
 # Логи
 *.log
 bot.log
+logs/
 
 # OS
 Thumbs.db

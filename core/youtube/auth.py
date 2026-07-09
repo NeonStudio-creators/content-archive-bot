@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from config import Settings
+from config import Settings, is_cloud_deploy
 from utils.tokens import parse_cookie_string
 
 logger = logging.getLogger(__name__)
@@ -106,7 +106,9 @@ class YouTubeSessionAuthManager:
         if runtime_session:
             return "auto-refresh (youtube.com)"
         if self._configured_cookies():
-            return "Railway (начальный YOUTUBE_SESSION_TOKEN)"
+            if is_cloud_deploy():
+                return "Railway (начальный YOUTUBE_SESSION_TOKEN)"
+            return ".env (начальный YOUTUBE_SESSION_TOKEN)"
         return "нет"
 
     def build_cookies(self) -> dict[str, str]:

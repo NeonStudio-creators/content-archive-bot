@@ -12,6 +12,7 @@ from aiogram.types import Message
 from core.link_resolver import LinkResolver
 from core.models import EntityType
 from core.platforms import Platform
+from config import secrets_hint
 from core.orchestrator import ArchiveOrchestrator
 from presenter.telegram_presenter import TelegramPresenter
 
@@ -91,14 +92,14 @@ def setup_link_handler(
                     if "WAF" in err or "mirror" in err.lower() or "SESSION" in err:
                         err = (
                             f"{err} "
-                            "Добавьте TIKTOK_SESSION_TOKEN в Railway "
+                            f"Добавьте TIKTOK_SESSION_TOKEN в {secrets_hint()} "
                             "(cookie sessionid с tiktok.com, как SESSION_TOKEN для IG)."
                         )
                 elif resolved.platform == Platform.YOUTUBE:
                     if "YOUTUBE" in err.upper() or "cookie" in err.lower() or "SESSION" in err:
                         err = (
                             f"{err} "
-                            "Добавьте YOUTUBE_SESSION_TOKEN в Railway "
+                            f"Добавьте YOUTUBE_SESSION_TOKEN в {secrets_hint()} "
                             "(cookies SID, SAPISID с youtube.com)."
                         )
                 elif "400" in err and "Bad Request" in err:

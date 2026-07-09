@@ -146,11 +146,34 @@ class Settings:
 settings = Settings.from_env
 
 
+def is_cloud_deploy() -> bool:
+    """Railway / другой облачный хостинг (IP датацентра)."""
+    return bool(
+        os.getenv("RAILWAY_ENVIRONMENT")
+        or os.getenv("RAILWAY_PROJECT_ID")
+        or os.getenv("RENDER")
+        or os.getenv("FLY_APP_NAME")
+    )
+
+
+def deploy_label() -> str:
+    if is_cloud_deploy():
+        return "облако (Railway)"
+    return "локальный ПК/VPS"
+
+
+def secrets_hint() -> str:
+    if is_cloud_deploy():
+        return "Variables в панели Railway"
+    return "файл .env в папке проекта"
+
+
 def log_config_status() -> None:
     """Логирует наличие переменных (без значений) — для отладки деплоя."""
     import logging
 
     log = logging.getLogger("content-explorer")
+    log.info("Runtime: %s", deploy_label())
     required = ("TELEGRAM_BOT_TOKEN", "SESSION_TOKEN")
     optional = (
         "CSRF_TOKEN",

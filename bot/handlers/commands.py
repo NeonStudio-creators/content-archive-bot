@@ -8,6 +8,7 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from config import deploy_label, secrets_hint
 from core.orchestrator import ArchiveOrchestrator
 
 router = Router(name="commands")
@@ -65,15 +66,24 @@ HELP_TEXT = """
 Сообщение 1 · превью + отчёт
 Сообщение 2 · JSON-архив
 
-<b>Настройка (Railway)</b>
+<b>Настройка</b>
 ───────────────
+Среда · {deploy}
+Секреты · {secrets}
 <code>TELEGRAM_BOT_TOKEN</code>
 <code>SESSION_TOKEN</code>
 <code>CSRF_TOKEN</code> — опционально (csrftoken обновляется автоматически)
 <code>TIKTOK_SESSION_TOKEN</code> — sessionid с tiktok.com
 <code>TIKTOK_CSRF_TOKEN</code> — tt_csrf_token (опционально)
 <code>YOUTUBE_SESSION_TOKEN</code> — cookies с youtube.com (обновляются автоматически)
+Локально · <code>scripts/local/install.ps1</code> / <code>run.ps1</code>
 """
+
+def _help_text() -> str:
+    return HELP_TEXT.format(
+        deploy=deploy_label(),
+        secrets=secrets_hint(),
+    )
 
 
 def setup_commands(orchestrator: ArchiveOrchestrator) -> Router:
@@ -83,6 +93,7 @@ def setup_commands(orchestrator: ArchiveOrchestrator) -> Router:
         yt_cookies = orchestrator.youtube_auth.build_cookies()
         lines = [
             "<b>ContentExplorer</b> · Проверка сессии",
+            f"Среда · {deploy_label()}",
             "",
             "<b>Instagram</b>",
         ]
@@ -139,7 +150,7 @@ def setup_commands(orchestrator: ArchiveOrchestrator) -> Router:
             lines.append(f"Не хватает · {', '.join(yt_diag['missing'])}")
             if yt_diag["env_len"] == 0:
                 lines.append(
-                    "  · переменная пуста — Railway не видит YOUTUBE_SESSION_TOKEN"
+                    f"  · переменная пуста — проверьте {secrets_hint()}"
                 )
             elif yt_diag["env_len"] < 80 and not yt_diag["env_keys"]:
                 lines.append(
@@ -184,4 +195,4 @@ async def cmd_start(message: Message) -> None:
 
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
-    await message.answer(HELP_TEXT, parse_mode="HTML", disable_web_page_preview=True)
+    await message.answer(_help_text(), parse_mode="HTML", disable_web_page_preview=True)

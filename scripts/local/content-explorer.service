@@ -1,0 +1,17 @@
+[Unit]
+Description=ContentExplorer Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@SERVICE_USER@
+WorkingDirectory=@PROJECT_ROOT@
+ExecStart=@PROJECT_ROOT@/.venv/bin/python @PROJECT_ROOT@/main.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:@PROJECT_ROOT@/logs/bot.log
+StandardError=append:@PROJECT_ROOT@/logs/bot.log
+
+[Install]
+WantedBy=multi-user.target

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 import aiohttp
 
-from config import Settings
+from config import Settings, is_cloud_deploy, secrets_hint
 from core.session_bootstrap import merge_cookies, parse_set_cookies
 from core.youtube.auth import YouTubeSessionAuthManager
 from core.youtube.hq_meta import _format_url
@@ -417,17 +417,23 @@ class YouTubeFetcher:
         )
 
     def _auth_hint(self) -> str:
+        where = secrets_hint()
         if self.auth.is_configured():
+            cloud = (
+                " На облачном IP (Railway) YouTube часто блокирует даже свежие cookies — "
+                "запускайте бота на домашнем ПК/VPS."
+                if is_cloud_deploy()
+                else ""
+            )
             return (
-                " Cookies устарели или неполные — обновите YOUTUBE_SESSION_TOKEN: "
-                "откройте youtube.com в Chrome (вы залогинены) → F12 → Application → "
-                "Cookies → скопируйте SID, SAPISID, __Secure-1PSID, __Secure-1PAPISID. "
-                "На Railway без свежих cookies видео часто недоступно."
+                " Cookies устарели или неполные — обновите YOUTUBE_SESSION_TOKEN в "
+                f"{where}: откройте youtube.com в Chrome (вы залогинены) → F12 → "
+                "Application → Cookies → скопируйте SID, SAPISID, __Secure-1PSID, "
+                f"__Secure-1PAPISID.{cloud}"
             )
         return (
-            " Добавьте YOUTUBE_SESSION_TOKEN в Railway "
-            "(SID + SAPISID + __Secure-1PSID + __Secure-1PAPISID с youtube.com). "
-            "С сервера Railway без cookies YouTube обычно блокирует видео."
+            f" Добавьте YOUTUBE_SESSION_TOKEN в {where} "
+            "(SID + SAPISID + __Secure-1PSID + __Secure-1PAPISID с youtube.com)."
         )
 
     async def fetch_channel(
@@ -742,7 +748,9 @@ class YouTubeFetcher:
                     "Не хватает: " + ", ".join(diag["missing"])
                 )
             if diag["env_len"] == 0:
-                result.errors.append("YOUTUBE_SESSION_TOKEN пуст в Railway")
+                result.errors.append(
+                    f"YOUTUBE_SESSION_TOKEN пуст ({secrets_hint()})"
+                )
 
         result.visitor_ok = bool(self._visitor_id)
         result.session_ok = self.auth.is_configured()
