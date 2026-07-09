@@ -67,6 +67,31 @@ def pick_source_best(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
     return sort_source_first(pool)[0]
 
 
+def pick_muxed_best(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Лучший поток с видео+аудио (progressive) — для Telegram без ffmpeg."""
+    muxed = [e for e in entries if e.get("is_muxed")]
+    if not muxed:
+        return None
+    return sorted(
+        muxed,
+        key=lambda e: (
+            *entry_quality_score(e),
+            1 if (e.get("format") or "").lower() == "mp4" else 0,
+        ),
+        reverse=True,
+    )[0]
+
+
+def filter_playback_candidates(
+    entries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Кандидаты для воспроизведения: сначала muxed, затем остальные."""
+    muxed = [e for e in entries if e.get("is_muxed")]
+    if muxed:
+        return sort_source_first(muxed)
+    return sort_source_first(entries)
+
+
 def filter_download_candidates(
     entries: list[dict[str, Any]],
     *,

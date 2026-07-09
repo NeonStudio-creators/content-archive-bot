@@ -23,7 +23,11 @@ from core.tiktok.audio_meta import extract_audio_sources
 from core.tiktok.auth import TikTokSessionAuthManager
 from core.tiktok.fetcher import TikTokFetcher
 from core.tiktok.resolver import TikTokLinkResolver
-from core.source_quality import filter_download_candidates, is_compressed_source
+from core.source_quality import (
+    filter_download_candidates,
+    filter_playback_candidates,
+    is_compressed_source,
+)
 from core.tiktok.cdn_urls import order_download_urls
 from core.tiktok.hq_meta import build_hq_downloads as build_tiktok_hq, hq_filename as tiktok_hq_filename
 from core.tiktok.parser import TikTokParser
@@ -685,7 +689,7 @@ class ArchiveOrchestrator:
             return
         hq = build_youtube_hq(player)
         video.extra.update(hq)
-        best_url = hq.get("hq_best_url")
+        best_url = hq.get("playback_best_url") or hq.get("hq_best_url")
         if best_url:
             video.url = best_url
         best = hq.get("hq_best") or {}
@@ -710,10 +714,38 @@ class ArchiveOrchestrator:
         *,
         prefer_hd: bool = True,
     ) -> list[str]:
-        return ArchiveOrchestrator._video_url_candidates_from_extra(
-            video,
-            source_only=prefer_hd,
-        )
+        extra = video.extra
+        seen: set[str] = set()
+        urls: list[str] = []
+
+        def add(url: str | None) -> None:
+            if url and url.startswith("http") and url not in seen:
+                seen.add(url)
+                urls.append(url)
+
+        all_entries = [
+            e
+            for e in (extra.get("hq_downloads") or [])
+            if e.get("source") != "audio"
+        ]
+        if prefer_hd:
+            entries = filter_playback_candidates(all_entries)
+            if not entries:
+                entries = filter_download_candidates(all_entries, source_only=True)
+        else:
+            entries = filter_playback_candidates(all_entries)
+
+        for entry in entries:
+            add(entry.get("url"))
+        for key in (
+            "playback_best_url",
+            "hq_best_url",
+            "video_url_best",
+            "adaptive_best_url",
+        ):
+            add(extra.get(key))
+        add(video.url)
+        return order_download_urls(urls, entries=entries or all_entries)
 
     async def _download_youtube_hq(
         self, bundle: ArchiveBundle
@@ -735,10 +767,14 @@ class ArchiveOrchestrator:
             or bundle.metadata.display_name
             or "youtube"
         )
-        entries = filter_download_candidates(
-            list(video.extra.get("hq_downloads") or []),
-            source_only=True,
-        )
+        all_entries = [
+            e
+            for e in (video.extra.get("hq_downloads") or [])
+            if e.get("source") != "audio"
+        ]
+        entries = filter_playback_candidates(all_entries)
+        if not entries:
+            entries = filter_download_candidates(all_entries, source_only=True)
         if not entries and video.extra.get("hq_best"):
             entries = [video.extra["hq_best"]]
         if not entries and video.url:

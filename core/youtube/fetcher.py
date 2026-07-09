@@ -409,8 +409,20 @@ class YouTubeFetcher:
         ):
             merged["streamingData"] = s_stream
         for key in ("videoDetails", "playabilityStatus", "microformat"):
-            if not merged.get(key) and secondary.get(key):
-                merged[key] = secondary[key]
+            sec_val = secondary.get(key)
+            if not sec_val:
+                continue
+            pri_val = merged.get(key)
+            if not pri_val:
+                merged[key] = sec_val
+            elif key == "videoDetails" and isinstance(pri_val, dict) and isinstance(
+                sec_val, dict
+            ):
+                filled = dict(sec_val)
+                for sub_key, sub_val in pri_val.items():
+                    if sub_val not in (None, "", [], {}):
+                        filled[sub_key] = sub_val
+                merged[key] = filled
         clients = [
             c
             for c in (

@@ -8,7 +8,7 @@ import re
 from typing import Any
 from urllib.parse import parse_qsl, unquote
 
-from core.source_quality import pick_source_best, source_type_rank
+from core.source_quality import pick_muxed_best, pick_source_best, source_type_rank
 
 
 def _format_url(fmt: dict[str, Any]) -> str | None:
@@ -33,6 +33,7 @@ def _entry(
     fmt: dict[str, Any],
     *,
     source: str,
+    is_muxed: bool = False,
 ) -> dict[str, Any] | None:
     url = _format_url(fmt)
     if not url or not url.startswith("http"):
@@ -40,17 +41,21 @@ def _entry(
     width = fmt.get("width")
     height = fmt.get("height")
     label = f"{width}×{height}" if width and height else source
+    mime = (fmt.get("mimeType") or "video/mp4").lower()
+    fmt_ext = mime.split("/")[-1].split(";")[0]
     return {
         "url": url,
         "width": width,
         "height": height,
         "source": source,
-        "format": (fmt.get("mimeType") or "video/mp4").split("/")[-1].split(";")[0],
+        "format": fmt_ext,
         "size_bytes": fmt.get("contentLength"),
         "bitrate": fmt.get("bitrate"),
         "fps": fmt.get("fps"),
         "label": label,
         "itag": fmt.get("itag"),
+        "is_muxed": is_muxed,
+        "has_audio": is_muxed,
     }
 
 
@@ -62,20 +67,20 @@ def build_hq_downloads(player: dict[str, Any]) -> dict[str, Any]:
     for fmt in streaming.get("adaptiveFormats") or []:
         mime = (fmt.get("mimeType") or "").lower()
         if "audio" in mime and "video" not in mime:
-            entry = _entry(fmt, source="audio")
+            entry = _entry(fmt, source="audio", is_muxed=False)
             if entry and entry["url"] not in seen:
                 seen.add(entry["url"])
                 entries.append(entry)
             continue
         if "video" not in mime:
             continue
-        entry = _entry(fmt, source="source")
+        entry = _entry(fmt, source="adaptive", is_muxed=False)
         if entry and entry["url"] not in seen:
             seen.add(entry["url"])
             entries.append(entry)
 
     for fmt in streaming.get("formats") or []:
-        entry = _entry(fmt, source="compressed")
+        entry = _entry(fmt, source="progressive", is_muxed=True)
         if entry and entry["url"] not in seen:
             seen.add(entry["url"])
             entries.append(entry)
@@ -83,18 +88,29 @@ def build_hq_downloads(player: dict[str, Any]) -> dict[str, Any]:
     video_entries = [e for e in entries if e.get("source") != "audio"]
     video_entries.sort(
         key=lambda e: (
+            1 if e.get("is_muxed") else 0,
             source_type_rank(e.get("source")),
             (e.get("width") or 0) * (e.get("height") or 0),
             int(e.get("bitrate") or 0),
+            1 if (e.get("format") or "").lower() == "mp4" else 0,
         ),
         reverse=True,
     )
     entries = video_entries + [e for e in entries if e.get("source") == "audio"]
 
-    best = pick_source_best(video_entries) or (
-        video_entries[0] if video_entries else (entries[0] if entries else None)
+    playback = pick_muxed_best(video_entries)
+    adaptive_best = pick_source_best(
+        [e for e in video_entries if not e.get("is_muxed")]
     )
+    best = playback or adaptive_best or (video_entries[0] if video_entries else None)
+
     result: dict[str, Any] = {"hq_downloads": entries}
+    if playback:
+        result["playback_best"] = playback
+        result["playback_best_url"] = playback["url"]
+    if adaptive_best:
+        result["adaptive_best"] = adaptive_best
+        result["adaptive_best_url"] = adaptive_best["url"]
     if best:
         result["hq_best"] = best
         result["hq_best_url"] = best["url"]
@@ -105,6 +121,7 @@ def build_hq_downloads(player: dict[str, Any]) -> dict[str, Any]:
             result["resolution"] = f"{w}x{h}"
             result["width"] = w
             result["height"] = h
+        result["has_audio"] = bool(best.get("is_muxed"))
     return {k: v for k, v in result.items() if v not in (None, [], {})}
 
 

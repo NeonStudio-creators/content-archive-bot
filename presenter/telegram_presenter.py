@@ -19,7 +19,7 @@ from aiogram.types import (
 
 from core.models import ArchiveBundle, EntityType, MediaAsset
 from core.platforms import Platform
-from core.source_quality import filter_download_candidates
+from core.source_quality import filter_download_candidates, filter_playback_candidates
 from core.tiktok.cdn_urls import order_download_urls
 from core.tiktok.hq_meta import build_hq_downloads as build_tiktok_hq_downloads
 from core.profile_adapter import (
@@ -493,19 +493,30 @@ class TelegramPresenter:
                 seen.add(url)
                 urls.append(url)
 
-        entries = filter_download_candidates(
-            list(extra.get("hq_downloads") or []),
-            source_only=prefer_hd,
-        )
+        all_entries = [
+            e
+            for e in (extra.get("hq_downloads") or [])
+            if e.get("source") != "audio"
+        ]
+        if prefer_hd:
+            entries = filter_playback_candidates(all_entries)
+            if not entries:
+                entries = filter_download_candidates(all_entries, source_only=True)
+        else:
+            entries = filter_playback_candidates(all_entries)
+
         for entry in entries:
-            if entry.get("source") == "audio":
-                continue
             add(entry.get("url"))
 
-        for key in ("hq_best_url", "video_url_best"):
+        for key in (
+            "playback_best_url",
+            "hq_best_url",
+            "video_url_best",
+            "adaptive_best_url",
+        ):
             add(extra.get(key))
         add(asset.url)
-        return order_download_urls(urls, entries=entries)
+        return order_download_urls(urls, entries=entries or all_entries)
 
     async def _download_youtube_video_bytes(
         self,
@@ -605,7 +616,7 @@ class TelegramPresenter:
                 asset,
                 label=label,
                 max_bytes=max_bytes,
-                prefer_hd=prefer_hd,
+                prefer_hd=True,
             )
         if not asset.url or not asset.url.startswith("http"):
             return None
@@ -669,8 +680,13 @@ class TelegramPresenter:
                 bundle, preview, label="hub_video"
             )
             if video_bytes:
+                preview_name = (
+                    "youtube_preview.mp4"
+                    if self._bundle_platform(bundle) == Platform.YOUTUBE
+                    else "tiktok_preview.mp4"
+                )
                 video_file = BufferedInputFile(
-                    video_bytes, filename="tiktok_preview.mp4"
+                    video_bytes, filename=preview_name
                 )
                 duration = (
                     int(preview.duration_sec)
@@ -1160,10 +1176,22 @@ class TelegramPresenter:
             content_lines.append(
                 self._kv("ID", f"<code>{th.esc(m.entity_id)}</code>")
             )
-        if m.title:
+        platform = self._bundle_platform(bundle)
+        video_title = (m.raw_fields or {}).get("video_title")
+        if video_title:
+            content_lines.append(self._kv("Название", f"<b>{th.esc(video_title)}</b>"))
+        elif m.title and platform != Platform.YOUTUBE:
             content_lines.append(
                 self._kv("Shortcode", f"<code>{th.esc(m.title)}</code>")
             )
+        if platform == Platform.YOUTUBE:
+            raw = m.raw_fields or {}
+            if raw.get("category"):
+                content_lines.append(self._kv("Категория", th.esc(str(raw["category"]))))
+            if raw.get("innertube_client"):
+                content_lines.append(
+                    self._kv("Источник", f"<code>{th.esc(raw['innertube_client'])}</code>")
+                )
         if m.created_at:
             content_lines.append(
                 self._kv(
@@ -1372,10 +1400,17 @@ class TelegramPresenter:
     def format_publication_hub(self, bundle: ArchiveBundle) -> str:
         m = bundle.metadata
         platform = self._bundle_platform(bundle)
+        raw = m.raw_fields or {}
         parts: list[str] = [
             f"<b>{self.BRAND}</b>\n",
             f"{th.esc(self.TYPE_LABEL[EntityType.PUBLICATION])}\n",
         ]
+
+        video_title = raw.get("video_title") or (
+            m.title if m.title and m.title != m.entity_id else None
+        )
+        if video_title:
+            parts.append(self._kv("Название", f"<b>{th.esc(video_title)}</b>") + "\n")
 
         author = m.display_name or m.username
         if author:
@@ -1384,7 +1419,30 @@ class TelegramPresenter:
                 if m.username
                 else th.esc(author)
             )
-            parts.append(self._kv("Автор", author_link) + "\n")
+            parts.append(self._kv("Канал", author_link) + "\n")
+
+        video = next((a for a in bundle.media if a.media_type == "video"), None)
+        meta_bits: list[str] = []
+        duration_text = raw.get("duration_text")
+        if not duration_text and video and video.duration_sec:
+            total = int(video.duration_sec)
+            hours, rem = divmod(total, 3600)
+            minutes, secs = divmod(rem, 60)
+            duration_text = (
+                f"{hours}:{minutes:02d}:{secs:02d}"
+                if hours
+                else f"{minutes}:{secs:02d}"
+            )
+        if duration_text:
+            meta_bits.append(f"⏱ {duration_text}")
+        if raw.get("resolution"):
+            meta_bits.append(f"📺 {raw['resolution']}")
+        if raw.get("category"):
+            meta_bits.append(th.esc(str(raw["category"])))
+        if m.created_at:
+            meta_bits.append(m.created_at.strftime("%d.%m.%Y"))
+        if meta_bits:
+            parts.append("\n" + " · ".join(meta_bits) + "\n")
 
         stat_bits: list[str] = []
         if m.view_count is not None:
@@ -1396,9 +1454,10 @@ class TelegramPresenter:
         if stat_bits:
             parts.append("\n" + " · ".join(stat_bits) + "\n")
 
-        if m.description:
+        description = m.description
+        if description and description != video_title:
             parts.append(self._section("Описание"))
-            parts.append(self._quote(m.description, max_len=700))
+            parts.append(self._quote(description, max_len=700))
 
         has_video = any(a.media_type == "video" for a in bundle.media)
         hint = (

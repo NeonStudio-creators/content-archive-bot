@@ -20,6 +20,32 @@ def _parse_count(text: str | None) -> int | None:
     return int(digits) if digits else None
 
 
+def _parse_publish_date(value: str | None) -> datetime | None:
+    if not value or not isinstance(value, str):
+        return None
+    value = value.strip()
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            dt = datetime.strptime(value.replace("Z", "+0000"), fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            continue
+    return None
+
+
+def _format_duration(seconds: float | None) -> str | None:
+    if not seconds or seconds <= 0:
+        return None
+    total = int(seconds)
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
 class YouTubeParser:
     def parse_video_quick(
         self,
@@ -75,10 +101,17 @@ class YouTubeParser:
         extra.update(extract_audio_sources(player))
         extra["source"] = player.get("_client", "innertube")
         extra["platform"] = "youtube"
+        if duration:
+            extra["duration_text"] = _format_duration(duration)
         if deep:
             extra["deep_collected"] = True
 
-        preview_url = extra.get("hq_best_url") or thumbnail or ""
+        preview_url = (
+            extra.get("playback_best_url")
+            or extra.get("hq_best_url")
+            or thumbnail
+            or ""
+        )
         media = [
             MediaAsset(
                 id=video_id,
@@ -93,26 +126,34 @@ class YouTubeParser:
             )
         ]
 
+        publish_date = micro.get("publishDate") or micro.get("uploadDate")
+        created_at = _parse_publish_date(publish_date)
+
         metadata = EntityMetadata(
             entity_id=video_id,
             entity_type=EntityType.PUBLICATION,
-            title=video_id,
+            title=title or video_id,
             description=description or title,
             username=channel_id,
-            display_name=channel,
+            display_name=channel or channel_id,
             avatar_url=None,
             view_count=view_count,
             like_count=None,
             comment_count=None,
-            created_at=None,
+            created_at=created_at,
             tags=[],
             raw_fields={
                 "platform": "youtube",
                 "channel_id": channel_id,
                 "channel_name": channel,
+                "video_title": title,
                 "is_live": details.get("isLiveContent"),
                 "category": micro.get("category"),
-                "publish_date": micro.get("publishDate"),
+                "publish_date": publish_date,
+                "duration_text": _format_duration(duration),
+                "innertube_client": player.get("_client"),
+                "has_audio": extra.get("has_audio"),
+                "resolution": extra.get("resolution"),
             },
         )
 
