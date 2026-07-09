@@ -682,11 +682,18 @@ class YouTubeFetcher:
             session_ok=False,
             visitor_ok=bool(self._visitor_id),
         )
-        if not result.configured:
-            result.errors.append("YOUTUBE_SESSION_TOKEN не задан")
-            return result
-
         await self.bootstrap_auth_session(force=True)
+        result.configured = self.auth.is_configured()
+        result.cookie_count = len(self.auth.build_cookies())
+        if not result.configured:
+            diag = self.auth.cookie_diagnostic()
+            if diag["missing"]:
+                result.errors.append(
+                    "Не хватает: " + ", ".join(diag["missing"])
+                )
+            if diag["env_len"] == 0:
+                result.errors.append("YOUTUBE_SESSION_TOKEN пуст в Railway")
+            return result
         result.visitor_ok = bool(self._visitor_id)
         result.cookie_count = len(self.auth.build_cookies())
         result.session_ok = self.auth.is_configured()

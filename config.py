@@ -15,6 +15,7 @@ from utils.tokens import (
     assemble_youtube_session_token,
     normalize_csrf_token,
     normalize_session_token,
+    parse_cookie_string,
 )
 
 # .env — для локального запуска; на деплое используются Variables платформы
@@ -169,3 +170,27 @@ def log_config_status() -> None:
     for name in optional:
         if os.getenv(name, "").strip():
             log.info("Env %s: OK", name)
+
+    yt_raw = assemble_youtube_session_token()
+    yt_parts = [
+        name
+        for name in (
+            "YOUTUBE_SID",
+            "YOUTUBE_SAPISID",
+            "YOUTUBE_SECURE_1PSID",
+            "YOUTUBE_SECURE1PSID",
+            "YOUTUBE_SECURE_1PAPISID",
+            "YOUTUBE_SECURE1PAPISID",
+        )
+        if os.getenv(name, "").strip()
+    ]
+    if yt_raw.strip():
+        log.info(
+            "YouTube cookies env: %s chars, keys=%s",
+            len(yt_raw.strip()),
+            sorted(parse_cookie_string(yt_raw).keys()),
+        )
+    elif yt_parts:
+        log.info("YouTube cookies env: separate vars %s", yt_parts)
+    else:
+        log.warning("YouTube cookies env: MISSING")

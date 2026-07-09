@@ -127,10 +127,25 @@ def setup_commands(orchestrator: ArchiveOrchestrator) -> Router:
             f"TIKTOK_CSRF_TOKEN · {'OK' if tt_csrf else 'опционально'}",
             "",
             "<b>YouTube</b>",
-            f"YOUTUBE_SESSION_TOKEN · {'OK' if orchestrator.youtube_auth.is_configured() else 'нет'}",
-            f"Источник cookies · {orchestrator.youtube_auth.session_source_label()}",
-            f"Cookies · {len(yt_cookies)} шт.",
         ])
+        yt_diag = orchestrator.youtube_auth.cookie_diagnostic()
+        lines.extend([
+            f"YOUTUBE_SESSION_TOKEN · {'OK' if yt_diag['ok'] else 'нет'}",
+            f"Источник cookies · {orchestrator.youtube_auth.session_source_label()}",
+            f"Env · {yt_diag['env_len']} симв., ключи: {', '.join(yt_diag['env_keys']) or '—'}",
+            f"Всего cookies · {len(yt_cookies)} ({', '.join(yt_diag['all_keys'])})",
+        ])
+        if yt_diag["missing"]:
+            lines.append(f"Не хватает · {', '.join(yt_diag['missing'])}")
+            if yt_diag["env_len"] == 0:
+                lines.append(
+                    "  · переменная пуста — Railway не видит YOUTUBE_SESSION_TOKEN"
+                )
+            elif yt_diag["env_len"] < 80 and not yt_diag["env_keys"]:
+                lines.append(
+                    "  · многострочное значение могло обрезаться — "
+                    "используйте одну строку через «;» или YOUTUBE_SID, YOUTUBE_SAPISID…"
+                )
         try:
             yt = await orchestrator.youtube_fetcher.verify_session()
             interval = orchestrator.settings.token_refresh_interval_sec

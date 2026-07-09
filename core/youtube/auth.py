@@ -18,6 +18,11 @@ from utils.tokens import parse_cookie_string
 
 logger = logging.getLogger(__name__)
 
+YOUTUBE_REQUIRED_KEYS = (
+    ("SID", "__Secure-1PSID"),  # хотя бы один — сессия
+    ("SAPISID", "__Secure-1PAPISID"),  # хотя бы один — авторизация API
+)
+
 YOUTUBE_REFRESHABLE_KEYS = frozenset({
     "SID",
     "HSID",
@@ -167,12 +172,33 @@ class YouTubeSessionAuthManager:
         headers["Referer"] = ref
         return headers
 
-    def is_configured(self) -> bool:
-        cookies = self.build_cookies()
-        has_session = bool(cookies.get("SID") or cookies.get("__Secure-1PSID"))
+    def env_cookie_keys(self) -> list[str]:
+        return sorted(self._configured_cookies().keys())
+
+    def env_raw_length(self) -> int:
+        return len(self.settings.youtube_session_token.strip())
+
+    def cookie_diagnostic(self) -> dict[str, object]:
+        configured = self._configured_cookies()
+        built = self.build_cookies()
+        missing: list[str] = []
+        has_session = bool(built.get("SID") or built.get("__Secure-1PSID"))
         has_auth = bool(
-            cookies.get("SAPISID")
-            or cookies.get("__Secure-1PAPISID")
-            or cookies.get("APISID")
+            built.get("SAPISID") or built.get("__Secure-1PAPISID")
         )
-        return has_session and has_auth
+        if not has_session:
+            missing.append("SID или __Secure-1PSID")
+        if not has_auth:
+            missing.append("SAPISID или __Secure-1PAPISID")
+        return {
+            "env_len": self.env_raw_length(),
+            "env_keys": self.env_cookie_keys(),
+            "runtime_keys": sorted(self._runtime_cookies.keys()),
+            "all_keys": sorted(built.keys()),
+            "missing": missing,
+            "ok": has_session and has_auth,
+        }
+
+    def is_configured(self) -> bool:
+        diag = self.cookie_diagnostic()
+        return bool(diag["ok"])

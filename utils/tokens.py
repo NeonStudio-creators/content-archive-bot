@@ -93,6 +93,10 @@ def parse_cookie_string(raw: str) -> dict[str, str]:
         part = part.strip()
         if not part or "=" not in part:
             continue
+        if part.lower().startswith("youtube_session_token="):
+            part = part.split("=", 1)[1].strip()
+            if not part or "=" not in part:
+                continue
         key, value = part.split("=", 1)
         raw_key = key.strip()
         key = _normalize_cookie_key(raw_key)
