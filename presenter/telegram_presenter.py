@@ -19,6 +19,7 @@ from aiogram.types import (
 
 from core.models import ArchiveBundle, EntityType, MediaAsset
 from core.platforms import Platform
+from core.tiktok.cdn_urls import sort_download_urls
 from core.tiktok.hq_meta import build_hq_downloads as build_tiktok_hq_downloads
 from core.profile_adapter import (
     extract_avatar_from_profile_payload,
@@ -435,7 +436,7 @@ class TelegramPresenter:
             add(entry.get("url"))
 
         add(asset.url)
-        return urls
+        return sort_download_urls(urls)
 
     async def _refresh_tiktok_asset_urls(
         self,

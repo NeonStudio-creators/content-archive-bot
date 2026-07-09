@@ -88,7 +88,11 @@ class TikTokParser:
             stats = safe_dict(item.get("stats"))
             video = safe_dict(item.get("video"))
             music = safe_dict(item.get("music"))
-            play_url = video.get("playAddr") or video.get("downloadAddr")
+            play_url = (
+                item.get("play")
+                or video.get("playAddr")
+                or video.get("downloadAddr")
+            )
             title = item.get("desc") or ""
             username = author.get("uniqueId")
             display = author.get("nickname")
@@ -107,7 +111,8 @@ class TikTokParser:
                 "id": video_id,
                 "title": title,
                 "play": play_url,
-                "hdplay": video.get("downloadAddr") or play_url,
+                "hdplay": item.get("hdplay") or video.get("downloadAddr") or play_url,
+                "wmplay": item.get("wmplay"),
                 "cover": cover,
                 "duration": duration,
                 "play_count": view_count,

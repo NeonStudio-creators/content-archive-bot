@@ -16,6 +16,7 @@ import aiohttp
 from config import Settings
 from core.session_bootstrap import merge_cookies, parse_set_cookies
 from core.tiktok.auth import TikTokSessionAuthManager
+from core.tiktok.cdn_urls import is_restricted_download_url, sort_download_urls
 from core.tiktok.resolver import TikTokLinkResolver
 from utils.rate_limit import QuietRateLimiter
 from utils.retry import with_retry
@@ -350,6 +351,41 @@ class TikTokFetcher:
             + hint
         )
 
+    async def _enrich_mirror_downloads(
+        self,
+        item: dict[str, Any],
+        canonical: str,
+        *,
+        video_id: str | None = None,
+        username: str | None = None,
+    ) -> None:
+        """
+        HTML/API отдают playAddr на webapp-prime CDN (403 с бэкенда).
+        Дополняем рабочими play/hdplay с tikwm.
+        """
+        try:
+            mirror = await self.fetch_video_mirror(
+                canonical,
+                video_id=video_id,
+                username=username,
+            )
+        except Exception as exc:
+            logger.warning("mirror enrich failed: %s", exc)
+            return
+
+        for key in (
+            "play",
+            "hdplay",
+            "wmplay",
+            "cover",
+            "size",
+            "hd_size",
+            "wm_size",
+        ):
+            if mirror.get(key):
+                item[key] = mirror[key]
+        item["_mirror_enriched"] = True
+
     async def fetch_video(
         self,
         url: str,
@@ -360,16 +396,31 @@ class TikTokFetcher:
         canonical = await self.resolve_short_url(
             url, video_id=video_id, username=username
         )
+        item_id = video_id or TikTokLinkResolver.extract_video_id(canonical)
+
         item = await self.fetch_video_via_html(canonical)
         if item:
             item["_source"] = "html"
+            item["_canonical_url"] = canonical
+            await self._enrich_mirror_downloads(
+                item,
+                canonical,
+                video_id=item_id,
+                username=username,
+            )
             return item
 
-        item_id = video_id or TikTokLinkResolver.extract_video_id(canonical)
         if item_id:
             api_item = await self.fetch_video_via_api(item_id, canonical)
             if api_item:
                 api_item["_source"] = "api"
+                api_item["_canonical_url"] = canonical
+                await self._enrich_mirror_downloads(
+                    api_item,
+                    canonical,
+                    video_id=item_id,
+                    username=username,
+                )
                 return api_item
 
         if not self.auth.is_configured():
@@ -468,11 +519,18 @@ class TikTokFetcher:
                     allow_redirects=True,
                 ) as resp:
                     if resp.status >= 400:
+                        hint = (
+                            " (restricted CDN)"
+                            if resp.status == 403
+                            and is_restricted_download_url(url)
+                            else ""
+                        )
                         logger.warning(
-                            "%s: HTTP %s for %s",
+                            "%s: HTTP %s for %s%s",
                             label,
                             resp.status,
                             url[:80],
+                            hint,
                         )
                         continue
 
@@ -519,9 +577,9 @@ class TikTokFetcher:
         label: str = "tiktok_media",
         max_bytes: int = 48 * 1024 * 1024,
     ) -> tuple[bytes, int, str]:
-        """Пробует список CDN-URL по очереди."""
+        """Пробует список CDN-URL по очереди (mirror CDN раньше webapp-prime)."""
         errors: list[str] = []
-        for url in urls:
+        for url in sort_download_urls(urls):
             if not url or not str(url).startswith("http"):
                 continue
             try:

@@ -7,6 +7,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from core.tiktok.cdn_urls import download_url_rank
 from utils.dict_utils import safe_dict
 
 
@@ -84,6 +85,7 @@ def build_hq_downloads(item: dict[str, Any]) -> dict[str, Any]:
 
     entries.sort(
         key=lambda e: (
+            download_url_rank(e.get("url") or ""),
             (e.get("width") or 0) * (e.get("height") or 0),
             e.get("size_bytes") or 0,
         ),

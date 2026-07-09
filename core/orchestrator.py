@@ -23,6 +23,7 @@ from core.tiktok.audio_meta import extract_audio_sources
 from core.tiktok.auth import TikTokSessionAuthManager
 from core.tiktok.fetcher import TikTokFetcher
 from core.tiktok.resolver import TikTokLinkResolver
+from core.tiktok.cdn_urls import sort_download_urls
 from core.tiktok.hq_meta import build_hq_downloads as build_tiktok_hq, hq_filename as tiktok_hq_filename
 from core.tiktok.parser import TikTokParser
 from core.tiktok.profile_adapter import extract_avatar_from_scope
@@ -401,7 +402,7 @@ class ArchiveOrchestrator:
             add(entry.get("url"))
 
         add(video.url)
-        return urls
+        return sort_download_urls(urls)
 
     async def _refresh_tiktok_video_media(self, bundle: ArchiveBundle) -> bool:
         video = next((a for a in bundle.media if a.media_type == "video"), None)
