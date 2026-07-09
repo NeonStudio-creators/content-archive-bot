@@ -226,6 +226,7 @@ class InstagramSessionVerify:
         return self.strategy is not None
 
 
+@dataclass
 class GraphQLFetcher:
     """
     Выполняет GraphQL-запросы к внутреннему API платформы.
