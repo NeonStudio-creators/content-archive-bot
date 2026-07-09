@@ -11,7 +11,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from utils.tokens import normalize_csrf_token, normalize_session_token
+from utils.tokens import (
+    assemble_youtube_session_token,
+    normalize_csrf_token,
+    normalize_session_token,
+)
 
 # .env — для локального запуска; на деплое используются Variables платформы
 _PROJECT_ROOT = Path(__file__).resolve().parent
@@ -109,8 +113,7 @@ class Settings:
             youtube_base_url=os.getenv(
                 "YOUTUBE_BASE_URL", "https://www.youtube.com"
             ).rstrip("/"),
-            youtube_session_token=os.getenv("YOUTUBE_SESSION_TOKEN", "").strip()
-            or os.getenv("YOUTUBE_COOKIES", "").strip(),
+            youtube_session_token=assemble_youtube_session_token(),
             youtube_client_version=os.getenv(
                 "YOUTUBE_CLIENT_VERSION", "2.20260114.08.00"
             ).strip(),

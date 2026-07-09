@@ -75,7 +75,7 @@ def parse_cookie_string(raw: str) -> dict[str, str]:
         text = text.split("=", 1)[1].strip()
     if not text:
         return cookies
-    for part in text.split(";"):
+    for part in re.split(r"[;\r\n]+", text):
         part = part.strip()
         if not part or "=" not in part:
             continue
@@ -88,6 +88,38 @@ def parse_cookie_string(raw: str) -> dict[str, str]:
             continue
         cookies[key] = unquote(value)
     return cookies
+
+
+_YOUTUBE_ENV_KEYS: tuple[tuple[str, str], ...] = (
+    ("SID", "YOUTUBE_SID"),
+    ("HSID", "YOUTUBE_HSID"),
+    ("SSID", "YOUTUBE_SSID"),
+    ("APISID", "YOUTUBE_APISID"),
+    ("SAPISID", "YOUTUBE_SAPISID"),
+    ("__Secure-1PSID", "YOUTUBE_SECURE_1PSID"),
+    ("__Secure-1PAPISID", "YOUTUBE_SECURE_1PAPISID"),
+    ("__Secure-3PSID", "YOUTUBE_SECURE_3PSID"),
+    ("__Secure-3PAPISID", "YOUTUBE_SECURE_3PAPISID"),
+    ("LOGIN_INFO", "YOUTUBE_LOGIN_INFO"),
+)
+
+
+def assemble_youtube_session_token() -> str:
+    """
+    Собирает cookies из YOUTUBE_SESSION_TOKEN и/или отдельных переменных.
+    """
+    import os
+
+    chunks: list[str] = []
+    for env_name in ("YOUTUBE_SESSION_TOKEN", "YOUTUBE_COOKIES"):
+        raw = os.getenv(env_name, "").strip()
+        if raw:
+            chunks.append(raw)
+    for cookie_name, env_name in _YOUTUBE_ENV_KEYS:
+        value = os.getenv(env_name, "").strip()
+        if value:
+            chunks.append(f"{cookie_name}={value}")
+    return "\n".join(chunks)
 
 
 def extract_ds_user_id(session_id: str) -> str | None:
