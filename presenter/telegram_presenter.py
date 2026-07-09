@@ -591,26 +591,31 @@ class TelegramPresenter:
                     if preview.duration_sec
                     else None
                 )
-                for attempt_cap in (cap, ""):
+                caps = [cap] if cap else []
+                if report_fallback:
+                    caps.extend(
+                        th.truncate_html(report_fallback, limit)
+                        for limit in (TG_CAPTION_MAX, 900, 500)
+                        if limit != TG_CAPTION_MAX or not cap
+                    )
+                seen_caps: set[str] = set()
+                for attempt_cap in caps:
+                    if not attempt_cap or attempt_cap in seen_caps:
+                        continue
+                    seen_caps.add(attempt_cap)
                     try:
                         await message.answer_video(
                             video=video_file,
-                            caption=attempt_cap or None,
-                            parse_mode="HTML" if attempt_cap else None,
-                            reply_markup=keyboard if attempt_cap else None,
+                            caption=attempt_cap,
+                            parse_mode="HTML",
+                            reply_markup=keyboard,
                             duration=duration,
                             width=preview.width,
                             height=preview.height,
                         )
-                        if not attempt_cap and report_fallback:
-                            await self._send_html(
-                                message, report_fallback, keyboard
-                            )
                         return True
                     except TelegramBadRequest as exc:
                         logger.warning("TT video send: %s", exc)
-                        if not attempt_cap:
-                            break
                 try:
                     await message.answer_document(
                         video_file,
@@ -1204,6 +1209,17 @@ class TelegramPresenter:
         parts.append(self._footer())
         return th.truncate_html("".join(parts), TG_MAX_LENGTH)
 
+    def _publication_entity_token(
+        self,
+        entity_id: str,
+        *,
+        platform: Platform = Platform.INSTAGRAM,
+        username: str | None = None,
+    ) -> str:
+        if platform == Platform.TIKTOK and username:
+            return f"{entity_id}:{username.lstrip('@')}"[:57]
+        return entity_id[:57]
+
     def build_publication_hub_keyboard(
         self,
         entity_id: str,
@@ -1211,10 +1227,9 @@ class TelegramPresenter:
         platform: Platform = Platform.INSTAGRAM,
         username: str | None = None,
     ) -> InlineKeyboardMarkup:
-        if platform == Platform.TIKTOK and username:
-            eid = f"{entity_id}:{username.lstrip('@')}"[:57]
-        else:
-            eid = entity_id[:57]
+        eid = self._publication_entity_token(
+            entity_id, platform=platform, username=username
+        )
         prefix = "t" if platform == Platform.TIKTOK else "p"
         return InlineKeyboardMarkup(
             inline_keyboard=[
@@ -1232,6 +1247,37 @@ class TelegramPresenter:
                     InlineKeyboardButton(
                         text="Видео полностью",
                         callback_data=f"{prefix}:vid:{eid}",
+                    ),
+                    InlineKeyboardButton(
+                        text="HD загрузка",
+                        callback_data=f"{prefix}:hq:{eid}",
+                    ),
+                ],
+            ]
+        )
+
+    def build_publication_actions_keyboard(
+        self,
+        entity_id: str,
+        *,
+        platform: Platform = Platform.INSTAGRAM,
+        username: str | None = None,
+    ) -> InlineKeyboardMarkup:
+        """Кнопки после «Видео полностью»: профиль, звук, HD."""
+        eid = self._publication_entity_token(
+            entity_id, platform=platform, username=username
+        )
+        prefix = "t" if platform == Platform.TIKTOK else "p"
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="Профиль",
+                        callback_data=f"{prefix}:prof:{eid}",
+                    ),
+                    InlineKeyboardButton(
+                        text="Звук",
+                        callback_data=f"{prefix}:aud:{eid}",
                     ),
                     InlineKeyboardButton(
                         text="HD загрузка",
@@ -1696,6 +1742,39 @@ class TelegramPresenter:
             parse_mode="HTML",
         )
 
+    def _publication_keyboard_for_bundle(
+        self, bundle: ArchiveBundle
+    ) -> InlineKeyboardMarkup:
+        entity_id = bundle.metadata.title or bundle.metadata.entity_id or ""
+        return self.build_publication_actions_keyboard(
+            entity_id,
+            platform=self._bundle_platform(bundle),
+            username=bundle.metadata.username,
+        )
+
+    async def send_publication_video_report(
+        self,
+        message: Message,
+        bundle: ArchiveBundle,
+    ) -> None:
+        """Видео сверху + полный отчёт + кнопки профиль/звук/HD в одном сообщении."""
+        report = self.format_full_report(bundle)
+        caption = th.truncate_html(report, TG_CAPTION_MAX)
+        keyboard = self._publication_keyboard_for_bundle(bundle)
+        preview = self._pick_preview_media(bundle)
+        if preview:
+            sent = await self._send_preview_message(
+                message,
+                bundle,
+                preview,
+                caption=caption,
+                keyboard=keyboard,
+                report_fallback=report,
+            )
+            if sent:
+                return
+        await self._send_html(message, report, keyboard)
+
     async def deliver_hq_video(
         self,
         message: Message,
@@ -1761,25 +1840,50 @@ class TelegramPresenter:
             bundle, delivered=delivered, notice=None
         )
         safe_caption = th.truncate_html(caption, TG_CAPTION_MAX)
+        keyboard = self._publication_keyboard_for_bundle(bundle)
         doc = BufferedInputFile(file_bytes, filename=filename)
         video = next(
             (a for a in bundle.media if a.media_type == "video"), None
         )
-        try:
-            if video and filename.lower().endswith((".mp4", ".mov", ".webm")):
-                await message.answer_video(
-                    video=doc,
-                    caption=safe_caption,
-                    parse_mode="HTML",
-                )
-                return
-        except TelegramBadRequest as exc:
-            logger.warning("HQ video send failed: %s", exc)
-        await message.answer_document(
-            doc,
-            caption=safe_caption,
-            parse_mode="HTML",
+        duration = (
+            int(video.duration_sec)
+            if video and video.duration_sec
+            else None
         )
+        width = video.width if video else None
+        height = video.height if video else None
+        is_video = filename.lower().endswith((".mp4", ".mov", ".webm"))
+
+        if video and is_video:
+            for attempt_cap in (
+                safe_caption,
+                th.truncate_html(caption, 900),
+                th.truncate_html(caption, 500),
+            ):
+                try:
+                    await message.answer_video(
+                        video=doc,
+                        caption=attempt_cap,
+                        parse_mode="HTML",
+                        reply_markup=keyboard,
+                        duration=duration,
+                        width=width,
+                        height=height,
+                    )
+                    return
+                except TelegramBadRequest as exc:
+                    logger.warning("HQ video send: %s", exc)
+
+        try:
+            await message.answer_document(
+                doc,
+                caption=safe_caption,
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+        except TelegramBadRequest as exc:
+            logger.warning("HQ document send: %s", exc)
+            await message.answer_document(doc, caption=safe_caption)
 
     async def send_deep_report(
         self,
@@ -1790,7 +1894,13 @@ class TelegramPresenter:
         *,
         notice: str | None = None,
     ) -> None:
-        if mode in ("vid", "prof"):
+        if mode == "vid":
+            if bundle.resolved_type == EntityType.PUBLICATION:
+                await self.send_publication_video_report(message, bundle)
+            else:
+                await self.send_archive(bot, message, bundle)
+            return
+        if mode == "prof":
             await self.send_archive(bot, message, bundle)
             return
 
