@@ -91,26 +91,36 @@ class TelegramPresenter:
         settings: Settings,
         fetcher: GraphQLFetcher | None = None,
         tiktok_fetcher: object | None = None,
+        youtube_fetcher: object | None = None,
     ) -> None:
         self.settings = settings
         self.fetcher = fetcher
         self.tiktok_fetcher = tiktok_fetcher
+        self.youtube_fetcher = youtube_fetcher
         self._ig_base = settings.platform_base_url.rstrip("/")
         self._tt_base = settings.tiktok_base_url.rstrip("/")
+        self._yt_base = settings.youtube_base_url.rstrip("/")
 
     def _bundle_platform(self, bundle: ArchiveBundle) -> Platform:
-        if bundle.metadata.raw_fields.get("platform") == "tiktok":
+        platform = bundle.metadata.raw_fields.get("platform")
+        if platform == "tiktok":
             return Platform.TIKTOK
-        if "tiktok.com" in (bundle.source_url or "").lower():
+        if platform == "youtube":
+            return Platform.YOUTUBE
+        source = (bundle.source_url or "").lower()
+        if "tiktok.com" in source:
             return Platform.TIKTOK
+        if "youtube.com" in source or "youtu.be" in source:
+            return Platform.YOUTUBE
         return Platform.INSTAGRAM
 
     def _base_url(self, bundle: ArchiveBundle) -> str:
-        return (
-            self._tt_base
-            if self._bundle_platform(bundle) == Platform.TIKTOK
-            else self._ig_base
-        )
+        platform = self._bundle_platform(bundle)
+        if platform == Platform.TIKTOK:
+            return self._tt_base
+        if platform == Platform.YOUTUBE:
+            return self._yt_base
+        return self._ig_base
 
     @staticmethod
     def _kv(key: str, value: str) -> str:
@@ -139,11 +149,14 @@ class TelegramPresenter:
     def _profile_url(
         self, username: str, *, platform: Platform = Platform.INSTAGRAM
     ) -> str:
-        base = self._tt_base if platform == Platform.TIKTOK else self._ig_base
         user = username.strip("/").lstrip("@")
         if platform == Platform.TIKTOK:
-            return f"{base}/@{user}"
-        return f"{base}/{user}/"
+            return f"{self._tt_base}/@{user}"
+        if platform == Platform.YOUTUBE:
+            if user.startswith("UC") and len(user) >= 20:
+                return f"{self._yt_base}/channel/{user}"
+            return f"{self._yt_base}/@{user}"
+        return f"{self._ig_base}/{user}/"
 
     def _profile_link(
         self,
@@ -468,6 +481,65 @@ class TelegramPresenter:
             asset.url = best
         return True
 
+    @staticmethod
+    def _iter_youtube_video_urls(
+        asset: MediaAsset,
+        *,
+        prefer_hd: bool = False,
+    ) -> list[str]:
+        extra = asset.extra
+        seen: set[str] = set()
+        urls: list[str] = []
+
+        def add(url: str | None) -> None:
+            if url and url.startswith("http") and url not in seen:
+                seen.add(url)
+                urls.append(url)
+
+        if prefer_hd:
+            flat_keys = ("hq_best_url", "video_url_best")
+        else:
+            flat_keys = ("hq_best_url", "video_url_best")
+        for key in flat_keys:
+            val = extra.get(key)
+            if isinstance(val, str):
+                add(val)
+        for entry in extra.get("hq_downloads") or []:
+            if entry.get("source") == "audio":
+                continue
+            add(entry.get("url"))
+        add(asset.url)
+        return urls
+
+    async def _download_youtube_video_bytes(
+        self,
+        bundle: ArchiveBundle,
+        asset: MediaAsset,
+        *,
+        label: str = "preview_video",
+        max_bytes: int = 48 * 1024 * 1024,
+        prefer_hd: bool = False,
+    ) -> bytes | None:
+        if not self.youtube_fetcher:
+            return None
+        referer = bundle.source_url or self._base_url(bundle)
+        urls = self._iter_youtube_video_urls(asset, prefer_hd=prefer_hd)
+        if not urls:
+            return None
+        try:
+            data, _, _ = await self.youtube_fetcher.download_from_urls(
+                urls,
+                referer=referer,
+                label=label,
+                max_bytes=max_bytes,
+            )
+            return data
+        except ValueError as exc:
+            logger.warning("%s: %s", label, exc)
+        except Exception as exc:
+            logger.warning("%s download failed: %s", label, exc)
+        return None
+
     async def _download_tiktok_video_bytes(
         self,
         bundle: ArchiveBundle,
@@ -526,6 +598,14 @@ class TelegramPresenter:
                 max_bytes=max_bytes,
                 prefer_hd=prefer_hd,
             )
+        if platform == Platform.YOUTUBE:
+            return await self._download_youtube_video_bytes(
+                bundle,
+                asset,
+                label=label,
+                max_bytes=max_bytes,
+                prefer_hd=prefer_hd,
+            )
         if not asset.url or not asset.url.startswith("http"):
             return None
         referer = bundle.source_url or self._base_url(bundle)
@@ -556,6 +636,10 @@ class TelegramPresenter:
             if platform == Platform.TIKTOK and self.tiktok_fetcher:
                 return await self.tiktok_fetcher.download_image_bytes(
                     url, referer=referer, label=label
+                )
+            if platform == Platform.YOUTUBE and self.youtube_fetcher:
+                return await self.youtube_fetcher.download_bytes(
+                    url, referer=referer, label=label, max_bytes=8 * 1024 * 1024
                 )
             if self.fetcher:
                 return await self.fetcher.download_image_bytes(
@@ -664,7 +748,7 @@ class TelegramPresenter:
         report_fallback: str | None = None,
     ) -> bool:
         platform = self._bundle_platform(bundle)
-        if platform == Platform.TIKTOK:
+        if platform in (Platform.TIKTOK, Platform.YOUTUBE):
             return await self._send_tiktok_preview(
                 message,
                 bundle,
@@ -1231,7 +1315,13 @@ class TelegramPresenter:
         eid = self._publication_entity_token(
             entity_id, platform=platform, username=username
         )
-        prefix = "t" if platform == Platform.TIKTOK else "p"
+        prefix = (
+            "y"
+            if platform == Platform.YOUTUBE
+            else "t"
+            if platform == Platform.TIKTOK
+            else "p"
+        )
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
@@ -1268,7 +1358,13 @@ class TelegramPresenter:
         eid = self._publication_entity_token(
             entity_id, platform=platform, username=username
         )
-        prefix = "t" if platform == Platform.TIKTOK else "p"
+        prefix = (
+            "y"
+            if platform == Platform.YOUTUBE
+            else "t"
+            if platform == Platform.TIKTOK
+            else "p"
+        )
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
@@ -1296,14 +1392,14 @@ class TelegramPresenter:
             f"{th.esc(self.TYPE_LABEL[EntityType.PUBLICATION])}\n",
         ]
 
-        if m.username:
-            parts.append(
-                self._kv(
-                    "Автор",
-                    self._profile_link(m.username, platform=platform),
-                )
-                + "\n"
+        author = m.display_name or m.username
+        if author:
+            author_link = (
+                self._profile_link(m.username, m.display_name, platform=platform)
+                if m.username
+                else th.esc(author)
             )
+            parts.append(self._kv("Автор", author_link) + "\n")
 
         stat_bits: list[str] = []
         if m.view_count is not None:
@@ -1795,7 +1891,8 @@ class TelegramPresenter:
             except ValueError as exc:
                 notice = str(exc)
 
-        if not file_bytes and self._bundle_platform(bundle) == Platform.TIKTOK:
+        platform = self._bundle_platform(bundle)
+        if not file_bytes and platform == Platform.TIKTOK:
             video = next(
                 (a for a in bundle.media if a.media_type == "video"), None
             )
@@ -1808,6 +1905,21 @@ class TelegramPresenter:
                 )
                 if file_bytes:
                     meta = {"size_bytes": len(file_bytes)}
+
+        if not file_bytes and platform == Platform.YOUTUBE:
+            video = next(
+                (a for a in bundle.media if a.media_type == "video"), None
+            )
+            if video:
+                file_bytes = await self._download_youtube_video_bytes(
+                    bundle,
+                    video,
+                    label="hq_fallback",
+                    prefer_hd=True,
+                )
+                if file_bytes:
+                    meta = {"size_bytes": len(file_bytes)}
+                    filename = "youtube_hq.mp4"
 
         if file_bytes:
             await self.send_hq_report(

@@ -22,6 +22,24 @@ def normalize_csrf_token(raw: str) -> str:
     return unquote(token)
 
 
+def parse_cookie_string(raw: str) -> dict[str, str]:
+    """Парсит строку cookies: 'SID=abc; SAPISID=xyz' или document.cookie."""
+    cookies: dict[str, str] = {}
+    text = raw.strip().strip('"').strip("'")
+    if not text:
+        return cookies
+    for part in text.split(";"):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if key:
+            cookies[key] = unquote(value)
+    return cookies
+
+
 def extract_ds_user_id(session_id: str) -> str | None:
     """Первая часть sessionid до ':' — ds_user_id для cookies."""
     decoded = unquote(session_id.strip())

@@ -40,6 +40,9 @@ class Settings:
     tiktok_base_url: str = "https://www.tiktok.com"
     tiktok_session_token: str = ""
     tiktok_csrf_token: str = ""
+    youtube_base_url: str = "https://www.youtube.com"
+    youtube_session_token: str = ""
+    youtube_client_version: str = "2.20240710.00.00"
 
     # «Тихий» режим — задержки, потоки и лимиты
     request_delay_sec: float = 0.4
@@ -95,6 +98,14 @@ class Settings:
                 os.getenv("TIKTOK_CSRF_TOKEN", "").strip()
                 or os.getenv("TIKTOK_CSRF", "").strip()
             ),
+            youtube_base_url=os.getenv(
+                "YOUTUBE_BASE_URL", "https://www.youtube.com"
+            ).rstrip("/"),
+            youtube_session_token=os.getenv("YOUTUBE_SESSION_TOKEN", "").strip()
+            or os.getenv("YOUTUBE_COOKIES", "").strip(),
+            youtube_client_version=os.getenv(
+                "YOUTUBE_CLIENT_VERSION", "2.20240710.00.00"
+            ).strip(),
             request_delay_sec=float(os.getenv("REQUEST_DELAY_SEC", "0.8")),
             max_concurrent_requests=int(os.getenv("MAX_CONCURRENT_REQUESTS", "6")),
             max_retries=int(os.getenv("MAX_RETRIES", "3")),
@@ -129,6 +140,7 @@ def log_config_status() -> None:
         "CSRF_TOKEN",
         "TIKTOK_SESSION_TOKEN",
         "TIKTOK_CSRF_TOKEN",
+        "YOUTUBE_SESSION_TOKEN",
         "REQUEST_DELAY_SEC",
         "MAX_RETRIES",
     )

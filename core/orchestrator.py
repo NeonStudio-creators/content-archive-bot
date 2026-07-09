@@ -27,6 +27,13 @@ from core.tiktok.cdn_urls import sort_download_urls
 from core.tiktok.hq_meta import build_hq_downloads as build_tiktok_hq, hq_filename as tiktok_hq_filename
 from core.tiktok.parser import TikTokParser
 from core.tiktok.profile_adapter import extract_avatar_from_scope
+from core.youtube.auth import YouTubeSessionAuthManager
+from core.youtube.fetcher import YouTubeFetcher
+from core.youtube.hq_meta import build_hq_downloads as build_youtube_hq
+from core.youtube.hq_meta import hq_filename as youtube_hq_filename
+from core.youtube.audio_meta import extract_audio_sources as extract_youtube_audio
+from core.youtube.parser import YouTubeParser
+from core.youtube.resolver import YouTubeLinkResolver
 from utils.dict_utils import dig, safe_dict
 from utils.rate_limit import QuietRateLimiter
 
@@ -79,10 +86,16 @@ class ArchiveOrchestrator:
         )
         self.parser = EntityDeepCollector()
         self.tiktok_parser = TikTokParser()
+        self.youtube_auth = YouTubeSessionAuthManager(settings)
+        self.youtube_fetcher = YouTubeFetcher(
+            settings, self.youtube_auth, self.rate_limiter
+        )
+        self.youtube_parser = YouTubeParser()
 
     async def close(self) -> None:
         await self.fetcher.close()
         await self.tiktok_fetcher.close()
+        await self.youtube_fetcher.close()
 
     async def process_publication_quick(self, url: str) -> ArchiveBundle:
         """Быстрый сбор публикации — только медиа и описание, без комментариев."""
@@ -92,6 +105,8 @@ class ArchiveOrchestrator:
 
         if resolved.platform == Platform.TIKTOK:
             return await self._tiktok_publication_quick(resolved)
+        if resolved.platform == Platform.YOUTUBE:
+            return await self._youtube_publication_quick(resolved)
 
         if not self.auth.is_configured():
             raise RuntimeError("SESSION_TOKEN не настроен")
@@ -174,6 +189,12 @@ class ArchiveOrchestrator:
                 mode,
                 original_url=original_url,
             )
+        if platform == Platform.YOUTUBE:
+            return await self._youtube_publication_deep(
+                shortcode,
+                mode,
+                original_url=original_url,
+            )
 
         if not self.auth.is_configured():
             raise RuntimeError("SESSION_TOKEN не настроен")
@@ -252,6 +273,8 @@ class ArchiveOrchestrator:
         """Скачивает файл максимального качества для отправки в Telegram."""
         if platform == Platform.TIKTOK:
             return await self._download_tiktok_hq(bundle)
+        if platform == Platform.YOUTUBE:
+            return await self._download_youtube_hq(bundle)
 
         candidates_assets = [
             a
@@ -495,6 +518,8 @@ class ArchiveOrchestrator:
         """Скачивает оригинальный аудиофайл публикации."""
         if platform == Platform.TIKTOK:
             return await self._download_tiktok_audio(bundle)
+        if platform == Platform.YOUTUBE:
+            return await self._download_youtube_audio(bundle)
 
         video = next(
             (a for a in bundle.media if a.media_type == "video"), None
@@ -549,6 +574,199 @@ class ArchiveOrchestrator:
         safe_base = re.sub(r"[^\w\-.]+", "_", str(base)).strip("_")[:40]
         fmt = video.extra.get("audio_format") or "mp3"
         return data, f"{safe_base or 'audio'}.{fmt}"
+
+    async def _youtube_publication_quick(self, resolved: ResolvedLink) -> ArchiveBundle:
+        await self.youtube_fetcher.ensure_session()
+        video_id = resolved.identifiers.get("video_id") or YouTubeLinkResolver.extract_video_id(
+            resolved.original_url
+        )
+        if not video_id:
+            raise ValueError("Не удалось извлечь ID видео YouTube")
+        player = await self.youtube_fetcher.fetch_video(
+            resolved.original_url,
+            video_id=video_id,
+        )
+        return self.youtube_parser.parse_video_quick(resolved, player)
+
+    async def _youtube_publication_deep(
+        self,
+        entity_token: str,
+        mode: str,
+        *,
+        original_url: str | None = None,
+    ) -> ArchiveBundle:
+        await self.youtube_fetcher.ensure_session()
+        video_id = entity_token.strip()
+        if not video_id:
+            raise ValueError("Не указан ID видео YouTube")
+
+        url = original_url or YouTubeLinkResolver.watch_url(video_id)
+        resolved = ResolvedLink(
+            original_url=url,
+            entity_type=EntityType.PUBLICATION,
+            identifiers={"video_id": video_id},
+            platform=Platform.YOUTUBE,
+        )
+
+        if mode == "prof":
+            player = await self.youtube_fetcher.fetch_video(url, video_id=video_id)
+            details = player.get("videoDetails") or {}
+            channel_id = details.get("channelId")
+            if not channel_id:
+                raise ValueError("Не удалось определить канал автора")
+            profile_resolved = ResolvedLink(
+                original_url=YouTubeLinkResolver.channel_url(channel_id=channel_id),
+                entity_type=EntityType.PROFILE,
+                identifiers={"channel_id": channel_id},
+                platform=Platform.YOUTUBE,
+            )
+            return await self._collect_youtube_profile(profile_resolved)
+
+        player = await self.youtube_fetcher.fetch_video(url, video_id=video_id)
+        if mode == "vid":
+            return self.youtube_parser.parse_video_deep(resolved, player)
+
+        bundle = self.youtube_parser.parse_video_quick(resolved, player)
+        if mode == "aud":
+            await self._resolve_youtube_audio(bundle, player)
+        elif mode == "hq":
+            await self._resolve_youtube_hq(bundle, player)
+        return bundle
+
+    async def _resolve_youtube_hq(
+        self,
+        bundle: ArchiveBundle,
+        player: dict[str, Any],
+    ) -> None:
+        video = next((a for a in bundle.media if a.media_type == "video"), None)
+        if not video:
+            return
+        hq = build_youtube_hq(player)
+        video.extra.update(hq)
+        best_url = hq.get("hq_best_url")
+        if best_url:
+            video.url = best_url
+        best = hq.get("hq_best") or {}
+        if best.get("width"):
+            video.width = best["width"]
+        if best.get("height"):
+            video.height = best["height"]
+
+    async def _resolve_youtube_audio(
+        self,
+        bundle: ArchiveBundle,
+        player: dict[str, Any],
+    ) -> None:
+        video = next((a for a in bundle.media if a.media_type == "video"), None)
+        if not video:
+            return
+        video.extra.update(extract_youtube_audio(player))
+
+    @staticmethod
+    def _youtube_video_url_candidates(
+        video: MediaAsset,
+        *,
+        prefer_hd: bool = True,
+    ) -> list[str]:
+        extra = video.extra
+        seen: set[str] = set()
+        urls: list[str] = []
+
+        def add(url: str | None) -> None:
+            if url and url.startswith("http") and url not in seen:
+                seen.add(url)
+                urls.append(url)
+
+        keys = (
+            ("hq_best_url", "video_url_best", "play")
+            if prefer_hd
+            else ("play", "hq_best_url", "video_url_best")
+        )
+        for key in keys:
+            val = extra.get(key)
+            if isinstance(val, str):
+                add(val)
+
+        entries = list(extra.get("hq_downloads") or [])
+        if prefer_hd:
+            entries = sorted(
+                entries,
+                key=lambda e: (
+                    0 if e.get("source") == "audio" else 1,
+                    (e.get("width") or 0) * (e.get("height") or 0),
+                    int(e.get("bitrate") or 0),
+                ),
+                reverse=True,
+            )
+        for entry in entries:
+            if entry.get("source") == "audio":
+                continue
+            add(entry.get("url"))
+        add(video.url)
+        return urls
+
+    async def _download_youtube_hq(
+        self, bundle: ArchiveBundle
+    ) -> tuple[bytes, str, dict[str, Any]]:
+        video = next((a for a in bundle.media if a.media_type == "video"), None)
+        if not video:
+            raise ValueError("Нет видео для загрузки")
+
+        base = (
+            bundle.metadata.description
+            or bundle.metadata.display_name
+            or "youtube"
+        )
+        entries: list[dict[str, Any]] = list(video.extra.get("hq_downloads") or [])
+        if not entries and video.extra.get("hq_best"):
+            entries = [video.extra["hq_best"]]
+        if not entries and video.url:
+            entries = [{"url": video.url, "source": "fallback"}]
+        if not entries:
+            raise ValueError("Ссылки максимального качества недоступны")
+
+        urls = self._youtube_video_url_candidates(video, prefer_hd=True)
+        data, size, used_url = await self.youtube_fetcher.download_from_urls(
+            urls,
+            referer=bundle.source_url,
+            label="youtube_hq",
+        )
+        entry = next(
+            (e for e in entries if e.get("url") == used_url),
+            entries[0],
+        )
+        filename = youtube_hq_filename(base, entry, index=1)
+        return data, filename, {**entry, "size_bytes": size, "url": used_url}
+
+    async def _download_youtube_audio(
+        self, bundle: ArchiveBundle
+    ) -> tuple[bytes, str]:
+        video = next((a for a in bundle.media if a.media_type == "video"), None)
+        if not video:
+            raise ValueError("В видео нет аудиодорожки")
+
+        url = video.extra.get("audio_url")
+        if not url:
+            raise ValueError("Оригинальный аудиофайл недоступен")
+
+        data = await self.youtube_fetcher.download_bytes(
+            url,
+            referer=bundle.source_url,
+            label="youtube_audio",
+        )
+        music = video.extra.get("music") or {}
+        base = music.get("title") or bundle.metadata.display_name or "audio"
+        safe_base = re.sub(r"[^\w\-.]+", "_", str(base)).strip("_")[:40]
+        fmt = video.extra.get("audio_format") or "m4a"
+        return data, f"{safe_base or 'audio'}.{fmt}"
+
+    async def _collect_youtube_profile(self, resolved: ResolvedLink) -> ArchiveBundle:
+        ids = resolved.identifiers
+        payload = await self.youtube_fetcher.fetch_channel(
+            handle=ids.get("handle") or ids.get("username"),
+            channel_id=ids.get("channel_id"),
+        )
+        return self.youtube_parser.parse_profile(resolved, payload)
 
     async def _tiktok_publication_deep(
         self,
@@ -699,6 +917,14 @@ class ArchiveOrchestrator:
             if resolved.entity_type == EntityType.PUBLICATION:
                 return await self._tiktok_publication_quick(resolved)
             raise ValueError(f"TikTok: тип {resolved.entity_type} не поддерживается")
+
+        if resolved.platform == Platform.YOUTUBE:
+            await self.youtube_fetcher.ensure_session()
+            if resolved.entity_type == EntityType.PROFILE:
+                return await self._collect_youtube_profile(resolved)
+            if resolved.entity_type == EntityType.PUBLICATION:
+                return await self._youtube_publication_quick(resolved)
+            raise ValueError(f"YouTube: тип {resolved.entity_type} не поддерживается")
 
         if not self.auth.is_configured():
             raise RuntimeError("SESSION_TOKEN не настроен")

@@ -61,19 +61,12 @@ def setup_callbacks(
             if mode == "prof":
                 if platform == Platform.TIKTOK:
                     await orchestrator._ensure_tiktok_profile_avatar(bundle)
-                else:
+                elif platform == Platform.INSTAGRAM:
                     await orchestrator._ensure_profile_avatar(bundle)
             if mode == "aud":
-                if platform == Platform.TIKTOK:
-                    audio_bytes, filename = (
-                        await orchestrator.download_publication_audio(
-                            bundle, platform=Platform.TIKTOK
-                        )
-                    )
-                else:
-                    audio_bytes, filename = (
-                        await orchestrator.download_publication_audio(bundle)
-                    )
+                audio_bytes, filename = await orchestrator.download_publication_audio(
+                    bundle, platform=platform
+                )
                 await presenter.send_audio_report(
                     callback.message,
                     bundle,
@@ -84,9 +77,9 @@ def setup_callbacks(
                 await presenter.deliver_hq_video(
                     callback.message,
                     bundle,
-                    download_hq=lambda b: orchestrator.download_publication_hq(
+                    download_hq=lambda b, p=platform: orchestrator.download_publication_hq(
                         b,
-                        platform=platform,
+                        platform=p,
                     ),
                 )
             else:
@@ -146,6 +139,26 @@ def setup_callbacks(
         await _handle_hub(
             callback,
             platform=Platform.TIKTOK,
+            mode=mode,
+            entity_id=video_id,
+        )
+
+    @router.callback_query(F.data.startswith("y:"))
+    async def handle_youtube_hub(callback: CallbackQuery) -> None:
+        if not callback.data:
+            await callback.answer("Нет данных", show_alert=True)
+            return
+        parts = callback.data.split(":", 2)
+        if len(parts) != 3:
+            await callback.answer("Неверный формат", show_alert=True)
+            return
+        _, mode, video_id = parts
+        if mode not in presenter.PUB_MODES:
+            await callback.answer("Неизвестный режим", show_alert=True)
+            return
+        await _handle_hub(
+            callback,
+            platform=Platform.YOUTUBE,
             mode=mode,
             entity_id=video_id,
         )

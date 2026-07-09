@@ -9,6 +9,7 @@ import re
 from core.fetcher import LinkResolver as InstagramLinkResolver
 from core.fetcher import ResolvedLink
 from core.tiktok.resolver import TikTokLinkResolver
+from core.youtube.resolver import YouTubeLinkResolver
 
 
 class LinkResolver:
@@ -21,6 +22,8 @@ class LinkResolver:
         for pattern in (
             r"https?://(?:www\.)?instagram\.com/[^\s<>\"']+",
             r"https?://(?:www\.|vm\.|vt\.|m\.)?tiktok\.com/[^\s<>\"']+",
+            r"https?://(?:www\.|m\.)?youtube\.com/[^\s<>\"']+",
+            r"https?://youtu\.be/[^\s<>\"']+",
         ):
             for raw in re.findall(pattern, text, re.I):
                 url = LinkResolver.clean_url(raw)
@@ -34,6 +37,8 @@ class LinkResolver:
         lower = url.lower()
         if "tiktok.com" in lower:
             return TikTokLinkResolver.clean_url(url)
+        if YouTubeLinkResolver.is_youtube_url(url):
+            return YouTubeLinkResolver.clean_url(url)
         return InstagramLinkResolver.clean_url(url)
 
     @classmethod
@@ -41,4 +46,6 @@ class LinkResolver:
         clean = cls.clean_url(url)
         if "tiktok.com" in clean.lower():
             return TikTokLinkResolver.resolve(clean)
+        if YouTubeLinkResolver.is_youtube_url(clean):
+            return YouTubeLinkResolver.resolve(clean)
         return InstagramLinkResolver.resolve(clean)

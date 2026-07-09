@@ -31,6 +31,7 @@ def create_bot(settings: Settings) -> tuple[Bot, Dispatcher, ArchiveOrchestrator
         settings,
         fetcher=orchestrator.fetcher,
         tiktok_fetcher=orchestrator.tiktok_fetcher,
+        youtube_fetcher=orchestrator.youtube_fetcher,
     )
 
     dp.include_router(commands.setup_commands(orchestrator))

@@ -44,8 +44,13 @@ def setup_link_handler(
                 )
                 continue
 
-            platform_label = (
-                "TikTok" if resolved.platform == Platform.TIKTOK else "Instagram"
+            platform_labels = {
+                Platform.TIKTOK: "TikTok",
+                Platform.YOUTUBE: "YouTube",
+                Platform.INSTAGRAM: "Instagram",
+            }
+            platform_label = platform_labels.get(
+                resolved.platform, "Instagram"
             )
             if resolved.entity_type == EntityType.PUBLICATION:
                 status_msg = await message.answer(
@@ -88,6 +93,13 @@ def setup_link_handler(
                             f"{err} "
                             "Добавьте TIKTOK_SESSION_TOKEN в Railway "
                             "(cookie sessionid с tiktok.com, как SESSION_TOKEN для IG)."
+                        )
+                elif resolved.platform == Platform.YOUTUBE:
+                    if "YOUTUBE" in err.upper() or "cookie" in err.lower() or "SESSION" in err:
+                        err = (
+                            f"{err} "
+                            "Добавьте YOUTUBE_SESSION_TOKEN в Railway "
+                            "(cookies SID, SAPISID с youtube.com)."
                         )
                 elif "400" in err and "Bad Request" in err:
                     err = (

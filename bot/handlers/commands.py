@@ -14,7 +14,7 @@ router = Router(name="commands")
 
 START_TEXT = """
 <b>ContentExplorer</b>
-Архиватор контента Instagram и TikTok
+Архиватор контента Instagram, TikTok и YouTube
 
 <b>Возможности</b>
 ───────────────
@@ -35,6 +35,12 @@ Reels · <code>instagram.com/reel/…</code>
 Видео · <code>tiktok.com/@user/video/…</code>
 Профиль · <code>tiktok.com/@user</code>
 Короткие · <code>vm.tiktok.com/…</code>
+
+<b>YouTube</b>
+───────────────
+Видео · <code>youtube.com/watch?v=…</code>
+Shorts · <code>youtube.com/shorts/…</code>
+Канал · <code>youtube.com/@channel</code>
 
 Просто отправьте ссылку — команды не нужны.
 """
@@ -66,6 +72,7 @@ HELP_TEXT = """
 <code>CSRF_TOKEN</code> — обязателен (cookie csrftoken)
 <code>TIKTOK_SESSION_TOKEN</code> — sessionid с tiktok.com
 <code>TIKTOK_CSRF_TOKEN</code> — tt_csrf_token (опционально)
+<code>YOUTUBE_SESSION_TOKEN</code> — cookies с youtube.com (SID, SAPISID, …)
 """
 
 
@@ -75,6 +82,7 @@ def setup_commands(orchestrator: ArchiveOrchestrator) -> Router:
         await orchestrator.fetcher.ensure_session()
         csrf = orchestrator.auth.get_csrf_token()
         tt_csrf = orchestrator.tiktok_auth.get_csrf_token()
+        yt_cookies = orchestrator.youtube_auth.build_cookies()
         lines = [
             "<b>ContentExplorer</b> · Проверка сессии",
             "",
@@ -85,6 +93,10 @@ def setup_commands(orchestrator: ArchiveOrchestrator) -> Router:
             "<b>TikTok</b>",
             f"TIKTOK_SESSION_TOKEN · {'OK' if orchestrator.tiktok_auth.session_id else 'нет'}",
             f"TIKTOK_CSRF_TOKEN · {'OK' if tt_csrf else 'опционально'}",
+            "",
+            "<b>YouTube</b>",
+            f"YOUTUBE_SESSION_TOKEN · {'OK' if orchestrator.youtube_auth.is_configured() else 'нет'}",
+            f"Cookies · {len(yt_cookies)} шт.",
         ]
         try:
             data = await orchestrator.fetcher._fetch_profile_via_web_api(
