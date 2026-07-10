@@ -85,6 +85,7 @@ HELP_TEXT = """
 <code>GET /api/v1/tiktok/stats?url=…</code>
 <code>GET /api/v1/youtube/stats?url=…</code>
 Порт · <code>{api_port}</code> (переменная API_PORT)
+Авторизация · <code>Authorization: Bearer &lt;STATS_API_TOKEN&gt;</code>
 """
 
 def _help_text(settings_api_port: int = 8080) -> str:

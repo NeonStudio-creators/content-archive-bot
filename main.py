@@ -49,6 +49,7 @@ async def main() -> None:
     if settings.api_enabled:
         api_runner = await start_api_server(
             orchestrator,
+            settings,
             host=settings.api_host,
             port=settings.api_port,
         )

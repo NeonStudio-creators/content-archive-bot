@@ -11,6 +11,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from api.auth import parse_api_tokens
 from utils.tokens import (
     assemble_youtube_session_token,
     normalize_csrf_token,
@@ -75,6 +76,7 @@ class Settings:
     api_enabled: bool = True
     api_host: str = "0.0.0.0"
     api_port: int = 8080
+    stats_api_tokens: frozenset[str] = frozenset()
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -151,6 +153,10 @@ class Settings:
             api_port=int(
                 os.getenv("API_PORT") or os.getenv("PORT") or "8080"
             ),
+            stats_api_tokens=parse_api_tokens(
+                os.getenv("STATS_API_TOKENS", "").strip()
+                or os.getenv("API_TOKEN", "").strip()
+            ),
         )
 
 
@@ -197,6 +203,7 @@ def log_config_status() -> None:
         "MAX_RETRIES",
         "API_ENABLED",
         "API_PORT",
+        "STATS_API_TOKENS",
     )
 
     for name in required:

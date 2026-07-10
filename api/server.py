@@ -10,9 +10,11 @@ from typing import TYPE_CHECKING
 
 from aiohttp import web
 
+from api.auth import api_auth_middleware
 from api.models import StatsResponse
-from core.platforms import Platform
 from api.stats_service import StatsService
+from config import Settings
+from core.platforms import Platform
 
 if TYPE_CHECKING:
     from core.orchestrator import ArchiveOrchestrator
@@ -54,7 +56,10 @@ async def _read_url(request: web.Request) -> str | None:
     return None
 
 
-def create_app(orchestrator: ArchiveOrchestrator) -> web.Application:
+def create_app(
+    orchestrator: ArchiveOrchestrator,
+    settings: Settings,
+) -> web.Application:
     stats = StatsService(orchestrator)
 
     async def health(_request: web.Request) -> web.Response:
@@ -105,7 +110,8 @@ def create_app(orchestrator: ArchiveOrchestrator) -> web.Application:
         result = await stats.fetch(url, platform=platform)
         return _json_response(result, status=200 if result.ok else 502)
 
-    app = web.Application()
+    app = web.Application(middlewares=[api_auth_middleware])
+    app["api_tokens"] = settings.stats_api_tokens
     app.router.add_get("/health", health)
     app.router.add_get("/api/v1/stats", stats_any)
     app.router.add_post("/api/v1/stats", stats_any)
@@ -117,16 +123,26 @@ def create_app(orchestrator: ArchiveOrchestrator) -> web.Application:
 
 async def start_api_server(
     orchestrator: ArchiveOrchestrator,
+    settings: Settings,
     *,
     host: str,
     port: int,
 ) -> web.AppRunner:
-    app = create_app(orchestrator)
+    app = create_app(orchestrator, settings)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host, port)
     await site.start()
     logger.info("Stats API слушает http://%s:%s", host, port)
+    if settings.stats_api_tokens:
+        logger.info(
+            "Stats API: авторизация включена (%s токенов)",
+            len(settings.stats_api_tokens),
+        )
+    else:
+        logger.warning(
+            "Stats API: STATS_API_TOKENS не задан — доступ без авторизации"
+        )
     logger.info(
         "Эндпоинты: GET /api/v1/stats?url=… | /api/v1/instagram/stats | tiktok | youtube"
     )
