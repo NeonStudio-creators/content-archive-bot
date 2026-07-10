@@ -41,12 +41,16 @@ async def main() -> None:
         )
         sys.exit(1)
 
+    if settings.run_mode == "api":
+        logger.error("RUN_MODE=api — запускайте: python run_api.py")
+        sys.exit(1)
+
     bot, dp, orchestrator = create_bot(settings)
     register_startup(dp, orchestrator)
     register_shutdown(dp, orchestrator)
 
     api_runner: web.AppRunner | None = None
-    if settings.api_enabled:
+    if settings.api_enabled and settings.run_mode == "both":
         api_runner = await start_api_server(
             orchestrator,
             settings,

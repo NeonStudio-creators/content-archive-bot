@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from typing import Any
+
+from api.middleware import API_VERSION
 
 
 @dataclass
@@ -36,9 +39,11 @@ class StatsResponse:
     def to_dict(self) -> dict[str, Any]:
         body: dict[str, Any] = {
             "ok": self.ok,
+            "api_version": API_VERSION,
             "platform": self.platform,
             "entity_type": self.entity_type,
             "url": self.url,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
         }
         if self.username:
             body["username"] = self.username

@@ -73,6 +73,25 @@ class StatsService:
     async def fetch_youtube(self, url: str) -> StatsResponse:
         return await self.fetch(url, platform=Platform.YOUTUBE)
 
+    async def fetch_batch(
+        self,
+        urls: list[str],
+        *,
+        max_items: int = 20,
+    ) -> dict[str, object]:
+        items = [u.strip() for u in urls if u and str(u).strip()][:max_items]
+        results = []
+        for url in items:
+            result = await self.fetch(url)
+            results.append(result.to_dict())
+        ok = all(r.get("ok") for r in results) if results else False
+        return {
+            "ok": ok,
+            "api_version": "v1",
+            "count": len(results),
+            "results": results,
+        }
+
     async def _instagram(self, resolved: ResolvedLink) -> StatsResponse:
         if not self._orch.auth.is_configured():
             raise RuntimeError("SESSION_TOKEN не настроен")

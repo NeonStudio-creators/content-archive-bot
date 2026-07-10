@@ -28,8 +28,8 @@ load_dotenv(_PROJECT_ROOT / ".env", override=False)
 class Settings:
     """Централизованные настройки приложения."""
 
-    # Telegram
-    telegram_bot_token: str
+    # Telegram (не нужен при RUN_MODE=api)
+    telegram_bot_token: str = ""
 
     # Авторизация платформы (cookie sessionid)
     session_token: str
@@ -77,13 +77,20 @@ class Settings:
     api_host: str = "0.0.0.0"
     api_port: int = 8080
     stats_api_tokens: frozenset[str] = frozenset()
+    api_public_url: str = ""
+    api_cors_origins: frozenset[str] = frozenset()
+    run_mode: str = "both"
 
     @classmethod
     def from_env(cls) -> Settings:
+        run_mode = os.getenv("RUN_MODE", "both").strip().lower()
+        if run_mode not in ("bot", "api", "both"):
+            run_mode = "both"
+
         token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
         session = os.getenv("SESSION_TOKEN", "").strip()
 
-        if not token:
+        if run_mode in ("bot", "both") and not token:
             raise ValueError("TELEGRAM_BOT_TOKEN не задан в окружении")
         if not session:
             raise ValueError("SESSION_TOKEN не задан в окружении")
@@ -157,6 +164,33 @@ class Settings:
                 os.getenv("STATS_API_TOKENS", "").strip()
                 or os.getenv("API_TOKEN", "").strip()
             ),
+            api_public_url=cls._resolve_api_public_url(),
+            api_cors_origins=cls._parse_cors_origins(
+                os.getenv("API_CORS_ORIGINS", "").strip()
+            ),
+            run_mode=run_mode,
+        )
+
+    @staticmethod
+    def _resolve_api_public_url() -> str:
+        explicit = os.getenv("API_PUBLIC_URL", "").strip().rstrip("/")
+        if explicit:
+            return explicit
+        domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
+        if domain:
+            return f"https://{domain}"
+        port = os.getenv("API_PORT") or os.getenv("PORT") or "8080"
+        host = os.getenv("API_PUBLIC_HOST", "").strip()
+        if host:
+            return f"https://{host}" if not host.startswith("http") else host.rstrip("/")
+        return f"http://localhost:{port}"
+
+    @staticmethod
+    def _parse_cors_origins(raw: str) -> frozenset[str]:
+        if not raw:
+            return frozenset()
+        return frozenset(
+            part.strip() for part in raw.split(",") if part.strip()
         )
 
 

@@ -50,7 +50,8 @@ async def api_auth_middleware(
     request: web.Request,
     handler,
 ) -> web.StreamResponse:
-    if request.path == "/health":
+    public_paths = {"/health", "/api/v1", "/api/v1/openapi.json"}
+    if request.method == "OPTIONS" or request.path in public_paths:
         return await handler(request)
 
     allowed: frozenset[str] = request.app.get("api_tokens") or frozenset()

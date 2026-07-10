@@ -1,0 +1,14 @@
+# Отдельный Web Service на Railway — только API для стороннего сервиса
+# New Service → подключить тот же репозиторий → Root Directory: /
+# Settings → startCommand: python run_api.py
+# Networking → Generate Domain
+# Variables: SESSION_TOKEN, STATS_API_TOKENS, YOUTUBE_*, TIKTOK_* (без TELEGRAM_BOT_TOKEN)
+
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "python run_api.py"
+healthcheckPath = "/health"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
