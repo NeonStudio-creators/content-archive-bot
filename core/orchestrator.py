@@ -38,6 +38,7 @@ from core.youtube.hq_meta import build_hq_downloads as build_youtube_hq
 from core.youtube.hq_meta import hq_filename as youtube_hq_filename
 from core.youtube.audio_meta import extract_audio_sources as extract_youtube_audio
 from core.youtube.parser import YouTubeParser
+from core.telegram.fetcher import TelegramChannelFetcher
 from core.youtube.resolver import YouTubeLinkResolver
 from core.token_refresh import TokenRefresher
 from core.token_store import TokenStore
@@ -98,6 +99,7 @@ class ArchiveOrchestrator:
             settings, self.youtube_auth, self.rate_limiter
         )
         self.youtube_parser = YouTubeParser()
+        self.telegram_fetcher = TelegramChannelFetcher(settings)
         self.token_store = TokenStore(settings.token_cache_path)
         self.token_refresher = TokenRefresher(
             settings=settings,
@@ -121,6 +123,7 @@ class ArchiveOrchestrator:
         await self.fetcher.close()
         await self.tiktok_fetcher.close()
         await self.youtube_fetcher.close()
+        await self.telegram_fetcher.close()
 
     async def process_publication_quick(self, url: str) -> ArchiveBundle:
         """Быстрый сбор публикации — только медиа и описание, без комментариев."""

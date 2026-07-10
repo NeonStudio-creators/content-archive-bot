@@ -53,7 +53,9 @@ class StatsService:
                 return await self._instagram(resolved)
             if resolved.platform == Platform.TIKTOK:
                 return await self._tiktok(resolved)
-            return await self._youtube(resolved)
+            if resolved.platform == Platform.YOUTUBE:
+                return await self._youtube(resolved)
+            return await self._telegram(resolved)
         except Exception as exc:
             logger.warning("stats fetch failed %s: %s", clean, exc)
             return StatsResponse(
@@ -72,6 +74,9 @@ class StatsService:
 
     async def fetch_youtube(self, url: str) -> StatsResponse:
         return await self.fetch(url, platform=Platform.YOUTUBE)
+
+    async def fetch_telegram(self, url: str) -> StatsResponse:
+        return await self.fetch(url, platform=Platform.TELEGRAM)
 
     async def fetch_batch(
         self,
@@ -178,6 +183,68 @@ class StatsService:
                 author_followers=author_followers,
             )
         raise ValueError(f"YouTube: тип {resolved.entity_type.value} не поддерживается")
+
+    async def _telegram(self, resolved: ResolvedLink) -> StatsResponse:
+        if not self._orch.telegram_fetcher.is_configured():
+            raise ValueError(
+                "Telegram MTProto не настроен: TELEGRAM_API_ID, TELEGRAM_API_HASH, "
+                "TELEGRAM_SESSION (python scripts/telegram_login.py)"
+            )
+        ids = resolved.identifiers
+        if resolved.entity_type == EntityType.PROFILE:
+            data = await self._orch.telegram_fetcher.fetch_channel(
+                username=ids.get("username"),
+                channel_id=ids.get("channel_id"),
+            )
+            return StatsResponse(
+                ok=True,
+                platform="telegram",
+                entity_type="profile",
+                url=resolved.original_url,
+                username=data.get("username"),
+                display_name=data.get("title"),
+                stats=StatsPayload(
+                    followers=data.get("participants_count"),
+                    aggregate_views=data.get("aggregate_views"),
+                    publications=data.get("posts_sampled"),
+                ),
+                extra={
+                    "channel_id": data.get("channel_id"),
+                    "about": data.get("about"),
+                    "recent_posts": data.get("posts") or [],
+                },
+            )
+        if resolved.entity_type == EntityType.PUBLICATION:
+            message_id = int(ids["message_id"])
+            data = await self._orch.telegram_fetcher.fetch_post(
+                message_id=message_id,
+                username=ids.get("username"),
+                channel_id=ids.get("channel_id"),
+            )
+            post = data.get("post") or {}
+            return StatsResponse(
+                ok=True,
+                platform="telegram",
+                entity_type="publication",
+                url=resolved.original_url,
+                username=data.get("username"),
+                display_name=data.get("title"),
+                stats=StatsPayload(
+                    followers=data.get("participants_count"),
+                    views=post.get("views"),
+                    forwards=post.get("forwards"),
+                    reactions=post.get("reactions"),
+                ),
+                extra={
+                    "channel_id": data.get("channel_id"),
+                    "message_id": message_id,
+                    "text": post.get("text"),
+                    "date": post.get("date"),
+                },
+            )
+        raise ValueError(
+            f"Telegram: тип {resolved.entity_type.value} не поддерживается"
+        )
 
     async def _instagram_author_followers(self, username: str | None) -> int | None:
         if not username:

@@ -27,6 +27,7 @@ _PLATFORM_ROUTES = {
     "instagram": Platform.INSTAGRAM,
     "tiktok": Platform.TIKTOK,
     "youtube": Platform.YOUTUBE,
+    "telegram": Platform.TELEGRAM,
 }
 
 _BATCH_LIMIT = 20
@@ -94,7 +95,7 @@ def create_app(
             "ok": True,
             "api_version": API_VERSION,
             "name": "ContentExplorer Stats API",
-            "platforms": ["instagram", "tiktok", "youtube"],
+            "platforms": ["instagram", "tiktok", "youtube", "telegram"],
             "auth": "Authorization: Bearer <STATS_API_TOKEN>",
             "endpoints": {
                 "stats": f"{public_url}/api/v1/stats",
@@ -102,6 +103,7 @@ def create_app(
                 "instagram": f"{public_url}/api/v1/instagram/stats",
                 "tiktok": f"{public_url}/api/v1/tiktok/stats",
                 "youtube": f"{public_url}/api/v1/youtube/stats",
+                "telegram": f"{public_url}/api/v1/telegram/stats",
                 "openapi": f"{public_url}/api/v1/openapi.json",
             },
         })

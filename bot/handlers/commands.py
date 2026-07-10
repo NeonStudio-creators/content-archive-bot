@@ -84,6 +84,7 @@ HELP_TEXT = """
 <code>GET /api/v1/instagram/stats?url=…</code>
 <code>GET /api/v1/tiktok/stats?url=…</code>
 <code>GET /api/v1/youtube/stats?url=…</code>
+<code>GET /api/v1/telegram/stats?url=…</code>
 Порт · <code>{api_port}</code> (переменная API_PORT)
 Авторизация · <code>Authorization: Bearer &lt;STATS_API_TOKEN&gt;</code>
 """

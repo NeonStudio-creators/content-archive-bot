@@ -50,6 +50,11 @@ class Settings:
     youtube_session_token: str = ""
     youtube_client_version: str = "2.20260114.08.00"
 
+    # Telegram MTProto (Telethon) — статистика каналов
+    telegram_api_id: int = 0
+    telegram_api_hash: str = ""
+    telegram_session: str = ""
+
     # «Тихий» режим — задержки, потоки и лимиты
     request_delay_sec: float = 0.4
     max_concurrent_requests: int = 8
@@ -99,6 +104,8 @@ class Settings:
         if not cache_path:
             cache_path = str(_PROJECT_ROOT / ".token_cache.json")
 
+        tg_api_id, tg_api_hash, tg_session = cls._load_telegram_mtproto()
+
         return cls(
             telegram_bot_token=token,
             session_token=normalize_session_token(session),
@@ -132,6 +139,9 @@ class Settings:
             youtube_client_version=os.getenv(
                 "YOUTUBE_CLIENT_VERSION", "2.20260114.08.00"
             ).strip(),
+            telegram_api_id=tg_api_id,
+            telegram_api_hash=tg_api_hash,
+            telegram_session=tg_session,
             request_delay_sec=float(os.getenv("REQUEST_DELAY_SEC", "0.8")),
             max_concurrent_requests=int(os.getenv("MAX_CONCURRENT_REQUESTS", "6")),
             max_retries=int(os.getenv("MAX_RETRIES", "3")),
@@ -170,6 +180,19 @@ class Settings:
             ),
             run_mode=run_mode,
         )
+
+    @staticmethod
+    def _load_telegram_mtproto() -> tuple[int, str, str]:
+        api_id_raw = os.getenv("TELEGRAM_API_ID", "").strip()
+        api_id = int(api_id_raw) if api_id_raw.isdigit() else 0
+        api_hash = os.getenv("TELEGRAM_API_HASH", "").strip()
+        session = os.getenv("TELEGRAM_SESSION", "").strip()
+        session_path = os.getenv("TELEGRAM_SESSION_PATH", "").strip()
+        if not session and session_path:
+            path = Path(session_path)
+            if path.is_file():
+                session = path.read_text(encoding="utf-8").strip()
+        return api_id, api_hash, session
 
     @staticmethod
     def _resolve_api_public_url() -> str:
@@ -238,6 +261,8 @@ def log_config_status() -> None:
         "API_ENABLED",
         "API_PORT",
         "STATS_API_TOKENS",
+        "TELEGRAM_API_ID",
+        "TELEGRAM_SESSION",
     )
 
     for name in required:

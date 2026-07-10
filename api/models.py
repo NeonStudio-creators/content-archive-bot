@@ -20,6 +20,8 @@ class StatsPayload:
     comments: int | None = None
     publications: int | None = None
     aggregate_views: int | None = None
+    forwards: int | None = None
+    reactions: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {k: v for k, v in asdict(self).items() if v is not None}
@@ -35,6 +37,7 @@ class StatsResponse:
     display_name: str | None = None
     stats: StatsPayload = field(default_factory=StatsPayload)
     error: str | None = None
+    extra: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         body: dict[str, Any] = {
@@ -54,4 +57,6 @@ class StatsResponse:
             body["stats"] = stats
         if self.error:
             body["error"] = self.error
+        if self.extra:
+            body["extra"] = self.extra
         return body

@@ -12,7 +12,7 @@ def build_openapi_spec(*, base_url: str) -> dict[str, Any]:
         "info": {
             "title": "ContentExplorer Stats API",
             "description": (
-                "Подписчики и просмотры Instagram, TikTok, YouTube. "
+                "Подписчики и просмотры Instagram, TikTok, YouTube, Telegram. "
                 "Авторизация: Bearer-токен из STATS_API_TOKENS."
             ),
             "version": "1.0.0",
@@ -60,7 +60,7 @@ def build_openapi_spec(*, base_url: str) -> dict[str, Any]:
                         "api_version": {"type": "string"},
                         "platform": {
                             "type": "string",
-                            "enum": ["instagram", "tiktok", "youtube"],
+                            "enum": ["instagram", "tiktok", "youtube", "telegram"],
                         },
                         "entity_type": {
                             "type": "string",
@@ -149,7 +149,7 @@ def build_openapi_spec(*, base_url: str) -> dict[str, Any]:
                             "required": True,
                             "schema": {
                                 "type": "string",
-                                "enum": ["instagram", "tiktok", "youtube"],
+                                "enum": ["instagram", "tiktok", "youtube", "telegram"],
                             },
                         },
                         {

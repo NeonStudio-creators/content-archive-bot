@@ -12,6 +12,7 @@ from aiogram.types import Message
 from core.link_resolver import LinkResolver
 from core.models import EntityType
 from core.platforms import Platform
+from api.stats_service import StatsService
 from config import secrets_hint
 from core.orchestrator import ArchiveOrchestrator
 from presenter.telegram_presenter import TelegramPresenter
@@ -48,6 +49,7 @@ def setup_link_handler(
             platform_labels = {
                 Platform.TIKTOK: "TikTok",
                 Platform.YOUTUBE: "YouTube",
+                Platform.TELEGRAM: "Telegram",
                 Platform.INSTAGRAM: "Instagram",
             }
             platform_label = platform_labels.get(
@@ -67,6 +69,33 @@ def setup_link_handler(
 
             try:
                 clean = LinkResolver.clean_url(url)
+                if resolved.platform == Platform.TELEGRAM:
+                    result = await StatsService(orchestrator).fetch(clean)
+                    if not result.ok:
+                        raise ValueError(result.error or "Не удалось получить статистику")
+                    stats = result.stats.to_dict()
+                    lines = [
+                        f"<b>{presenter.BRAND}</b> · Telegram",
+                        "",
+                        f"<b>{result.display_name or result.username}</b>",
+                        f"<code>{result.url}</code>",
+                        "",
+                    ]
+                    if stats.get("followers") is not None:
+                        lines.append(f"Подписчики · <b>{stats['followers']:,}</b>")
+                    if stats.get("views") is not None:
+                        lines.append(f"Просмотры · <b>{stats['views']:,}</b>")
+                    if stats.get("aggregate_views") is not None:
+                        lines.append(
+                            f"Сумма просмотров (последние посты) · "
+                            f"<b>{stats['aggregate_views']:,}</b>"
+                        )
+                    if stats.get("forwards") is not None:
+                        lines.append(f"Пересылки · <b>{stats['forwards']:,}</b>")
+                    if stats.get("reactions") is not None:
+                        lines.append(f"Реакции · <b>{stats['reactions']:,}</b>")
+                    await status_msg.edit_text("\n".join(lines), parse_mode="HTML")
+                    continue
                 if resolved.entity_type == EntityType.PUBLICATION:
                     bundle = await orchestrator.process_publication_quick(clean)
                     await presenter.send_publication_hub(
