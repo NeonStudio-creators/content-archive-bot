@@ -34,11 +34,9 @@ def _json_response(
     status: int = 200,
 ) -> web.Response:
     payload = data.to_dict() if isinstance(data, StatsResponse) else data
-    return web.Response(
-        text=json.dumps(payload, ensure_ascii=False, indent=2),
-        content_type="application/json; charset=utf-8",
-        status=status,
-    )
+    return web.json_response(payload, status=status, dumps=lambda o: json.dumps(
+        o, ensure_ascii=False, indent=2
+    ))
 
 
 async def _read_url(request: web.Request) -> str | None:
