@@ -1,8 +1,10 @@
-# Railway: обязательно выберите тип сервиса "Worker", не "Web Service"
+# Railway: тип сервиса "Web Service" (нужен публичный URL для Stats API)
+# Telegram polling + HTTP API на PORT (Railway подставляет автоматически)
 [build]
 builder = "nixpacks"
 
 [deploy]
 startCommand = "python main.py"
+healthcheckPath = "/health"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
