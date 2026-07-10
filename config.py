@@ -28,11 +28,11 @@ load_dotenv(_PROJECT_ROOT / ".env", override=False)
 class Settings:
     """Централизованные настройки приложения."""
 
-    # Telegram (не нужен при RUN_MODE=api)
-    telegram_bot_token: str = ""
-
     # Авторизация платформы (cookie sessionid)
     session_token: str
+
+    # Telegram (не нужен при RUN_MODE=api)
+    telegram_bot_token: str = ""
     csrf_token: str = ""
     user_agent: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
