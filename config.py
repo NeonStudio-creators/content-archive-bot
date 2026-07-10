@@ -183,9 +183,9 @@ class Settings:
 
     @staticmethod
     def _load_telegram_mtproto() -> tuple[int, str, str]:
-        api_id_raw = os.getenv("TELEGRAM_API_ID", "").strip()
-        api_id = int(api_id_raw) if api_id_raw.isdigit() else 0
-        api_hash = os.getenv("TELEGRAM_API_HASH", "").strip()
+        from core.telegram.credentials import resolve_telegram_api_credentials
+
+        api_id, api_hash, _source = resolve_telegram_api_credentials()
         session = os.getenv("TELEGRAM_SESSION", "").strip()
         session_path = os.getenv("TELEGRAM_SESSION_PATH", "").strip()
         if not session and session_path:
@@ -296,3 +296,14 @@ def log_config_status() -> None:
         log.info("YouTube cookies env: separate vars %s", yt_parts)
     else:
         log.warning("YouTube cookies env: MISSING")
+
+    from core.telegram.credentials import resolve_telegram_api_credentials
+
+    tg_id, _tg_hash, tg_src = resolve_telegram_api_credentials()
+    tg_session = os.getenv("TELEGRAM_SESSION", "").strip()
+    log.info(
+        "Telegram MTProto: api_id=%s (%s), session=%s",
+        tg_id,
+        tg_src,
+        "OK" if tg_session else "MISSING",
+    )

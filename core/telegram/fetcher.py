@@ -41,20 +41,12 @@ class TelegramChannelFetcher:
         self._lock = asyncio.Lock()
 
     def is_configured(self) -> bool:
-        return bool(
-            self.settings.telegram_api_id
-            and self.settings.telegram_api_hash
-            and self.settings.telegram_session
-        )
+        return bool(self.settings.telegram_session)
 
     def _require_config(self) -> None:
-        if not self.settings.telegram_api_id or not self.settings.telegram_api_hash:
-            raise ValueError(
-                "Задайте TELEGRAM_API_ID и TELEGRAM_API_HASH с https://my.telegram.org"
-            )
         if not self.settings.telegram_session:
             raise ValueError(
-                "Задайте TELEGRAM_SESSION. Локально: python scripts/telegram_login.py"
+                "Задайте TELEGRAM_SESSION. Без VPN: python scripts/telegram_login.py"
             )
 
     def _build_client(self) -> TelegramClient:

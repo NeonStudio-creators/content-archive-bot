@@ -187,8 +187,8 @@ class StatsService:
     async def _telegram(self, resolved: ResolvedLink) -> StatsResponse:
         if not self._orch.telegram_fetcher.is_configured():
             raise ValueError(
-                "Telegram MTProto не настроен: TELEGRAM_API_ID, TELEGRAM_API_HASH, "
-                "TELEGRAM_SESSION (python scripts/telegram_login.py)"
+                "Telegram MTProto: нужен TELEGRAM_SESSION. "
+                "Запустите: python scripts/telegram_login.py (VPN не нужен)"
             )
         ids = resolved.identifiers
         if resolved.entity_type == EntityType.PROFILE:
