@@ -71,6 +71,11 @@ class Settings:
     token_cache_path: str = ""
     token_refresh_interval_sec: float = 1800.0
 
+    # HTTP Stats API (подписчики, просмотры)
+    api_enabled: bool = True
+    api_host: str = "0.0.0.0"
+    api_port: int = 8080
+
     @classmethod
     def from_env(cls) -> Settings:
         token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -140,6 +145,12 @@ class Settings:
             token_refresh_interval_sec=float(
                 os.getenv("TOKEN_REFRESH_INTERVAL_SEC", "1800")
             ),
+            api_enabled=os.getenv("API_ENABLED", "true").strip().lower()
+            in ("1", "true", "yes", "on"),
+            api_host=os.getenv("API_HOST", "0.0.0.0").strip() or "0.0.0.0",
+            api_port=int(
+                os.getenv("API_PORT") or os.getenv("PORT") or "8080"
+            ),
         )
 
 
@@ -184,6 +195,8 @@ def log_config_status() -> None:
         "TOKEN_REFRESH_INTERVAL_SEC",
         "REQUEST_DELAY_SEC",
         "MAX_RETRIES",
+        "API_ENABLED",
+        "API_PORT",
     )
 
     for name in required:

@@ -77,12 +77,21 @@ HELP_TEXT = """
 <code>TIKTOK_CSRF_TOKEN</code> — tt_csrf_token (опционально)
 <code>YOUTUBE_SESSION_TOKEN</code> — cookies с youtube.com (обновляются автоматически)
 Локально · <code>scripts/local/install.ps1</code> / <code>run.ps1</code>
+
+<b>Stats API</b>
+───────────────
+<code>GET /api/v1/stats?url=…</code>
+<code>GET /api/v1/instagram/stats?url=…</code>
+<code>GET /api/v1/tiktok/stats?url=…</code>
+<code>GET /api/v1/youtube/stats?url=…</code>
+Порт · <code>{api_port}</code> (переменная API_PORT)
 """
 
-def _help_text() -> str:
+def _help_text(settings_api_port: int = 8080) -> str:
     return HELP_TEXT.format(
         deploy=deploy_label(),
         secrets=secrets_hint(),
+        api_port=settings_api_port,
     )
 
 
@@ -195,4 +204,9 @@ async def cmd_start(message: Message) -> None:
 
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
-    await message.answer(_help_text(), parse_mode="HTML", disable_web_page_preview=True)
+    from config import Settings
+
+    port = Settings.from_env().api_port
+    await message.answer(
+        _help_text(port), parse_mode="HTML", disable_web_page_preview=True
+    )

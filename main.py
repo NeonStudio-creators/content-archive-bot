@@ -13,8 +13,10 @@ import asyncio
 import logging
 import sys
 
+from aiohttp import web
 from aiogram.exceptions import TelegramAPIError, TelegramUnauthorizedError
 
+from api.server import start_api_server
 from bot.app import create_bot, register_shutdown, register_startup
 from config import Settings, log_config_status, secrets_hint
 
@@ -43,6 +45,14 @@ async def main() -> None:
     register_startup(dp, orchestrator)
     register_shutdown(dp, orchestrator)
 
+    api_runner: web.AppRunner | None = None
+    if settings.api_enabled:
+        api_runner = await start_api_server(
+            orchestrator,
+            host=settings.api_host,
+            port=settings.api_port,
+        )
+
     logger.info("ContentExplorer запущен. Ожидаю сообщения…")
     try:
         await dp.start_polling(bot)
@@ -58,6 +68,8 @@ async def main() -> None:
         logger.exception("Критическая ошибка при polling")
         sys.exit(1)
     finally:
+        if api_runner is not None:
+            await api_runner.cleanup()
         await orchestrator.close()
         await bot.session.close()
 
